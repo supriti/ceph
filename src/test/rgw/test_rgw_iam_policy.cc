@@ -1879,3 +1879,25 @@ TEST_F(ConditionTest, KeyStoneRolePolicyParsing)
   multi_env.emplace("keystone:role", "testrole");
   EXPECT_TRUE(p->statements[0].conditions[0].eval(multi_env));
 }
+
+// User based access control. Bucket policy allows
+// access only to a specific keystone user via keystone:user_id.
+// User Alice passes, user bob does not.
+TEST_F(ConditionTest, KyestoneUserLevelAccess)
+{
+  std::string key = "keystone:user_id";
+
+  Condition cond{TokenID::StringEquals, key.data(), key.size(), false};
+  cond.vals.push_back("user_alice");
+
+  Environment env_alice;
+  env_alice.emplace(key, "user_alice");
+  EXPECT_TRUE(cond.eval(env_alice));
+
+  Environment env_bob;
+  env_alice.emplace(key, "user_bob");
+  EXPECT_FALSE(cond.eval(env_bob));
+
+  // Missing user_id in env
+  EXPECT_FALSE(cond.eval({}));
+}
