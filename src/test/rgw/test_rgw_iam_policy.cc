@@ -1880,24 +1880,25 @@ TEST_F(ConditionTest, KeyStoneRolePolicyParsing)
   EXPECT_TRUE(p->statements[0].conditions[0].eval(multi_env));
 }
 
-// User based access control. Bucket policy allows
-// access only to a specific keystone user via keystone:user_id.
-// User Alice passes, user bob does not.
-TEST_F(ConditionTest, KyestoneUserLevelAccess)
+
+TEST_F(ConditionTest, KeystoneUserIdStringEquals)
 {
-  std::string key = "keystone:user_id";
-
+  const std::string key = "keystone:user_id";
   Condition cond{TokenID::StringEquals, key.data(), key.size(), false};
-  cond.vals.push_back("user_alice");
+  cond.vals.push_back("user-123");
 
-  Environment env_alice;
-  env_alice.emplace(key, "user_alice");
-  EXPECT_TRUE(cond.eval(env_alice));
-
-  Environment env_bob;
-  env_alice.emplace(key, "user_bob");
-  EXPECT_FALSE(cond.eval(env_bob));
-
-  // Missing user_id in env
   EXPECT_FALSE(cond.eval({}));
+  EXPECT_TRUE(cond.eval({{key, "user-123"}}));
+  EXPECT_FALSE(cond.eval({{key, "user-456"}}));
+}
+
+TEST_F(ConditionTest, KeystoneProjectIdStringEquals)
+{
+  const std::string key = "keystone:project_id";
+  Condition cond{TokenID::StringEquals, key.data(), key.size(), false};
+  cond.vals.push_back("proj-123");
+
+  EXPECT_FALSE(cond.eval({}));
+  EXPECT_TRUE(cond.eval({{key, "proj-123"}}));
+  EXPECT_FALSE(cond.eval({{key, "proj-456"}}));
 }

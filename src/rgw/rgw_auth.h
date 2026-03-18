@@ -602,6 +602,7 @@ public:
     const std::optional<rgw::keystone::ScopeInfo> keystone_scope;
     const std::vector<std::string> keystone_roles;
     const std::string keystone_user_id;
+    const std::string keystone_project_id;
 
   public:
     enum class acct_privilege_t {
@@ -623,7 +624,8 @@ public:
              const uint32_t acct_type=TYPE_NONE,
              std::optional<rgw::keystone::ScopeInfo> keystone_scope=std::nullopt,
              std::vector<std::string> keystone_roles = {},
-             std::string keystone_user_id = {})
+             const std::string keystone_user_id = {},
+             const std::string keystone_project_id = {})
     : acct_user(acct_user),
       acct_name(acct_name),
       perm_mask(perm_mask),
@@ -634,7 +636,8 @@ public:
       keystone_user(keystone_user),
       keystone_scope(std::move(keystone_scope)),
       keystone_roles(std::move(keystone_roles)),
-      keystone_user_id(std::move(keystone_user_id)) {
+      keystone_user_id(keystone_user_id),
+      keystone_project_id(keystone_project_id) {
     }
   };
 

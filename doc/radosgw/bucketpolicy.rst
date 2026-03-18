@@ -126,6 +126,8 @@ For all requests, condition keys we support are:
 Request that authenticate with Keystone also include:
 
 - keystone:role
+- keystone:user_id
+- keystone:project_id
 
 We support certain S3 condition keys for bucket and object requests.
 
