@@ -434,29 +434,25 @@ RGWKmipHandles::do_one_entry(RGWKMIPTransceiver &element)
   auto h = get_kmip_handle();
   std::unique_lock l{element.lock};
 
-  if (h) {
+  if (!h) {
+    element.ret = -ERR_SERVICE_UNAVAILABLE;
+    element.done = true;
+    element.cond.notify_all();
+    return element.ret;
+  }
+
   int custom = element.execute(h->kmip_ctx, h->bio);
   if (custom != 0) {
-    // Positive = success, negative = error
-    // Convert positive to 0 for Ceph convention
     element.ret = (custom > 0) ? 0 : custom;
     element.done = true;
     element.cond.notify_all();
-    release_kmip_handle(h);
+    if (custom > 0) {
+      release_kmip_handle(h);
+    } else {
+      release_kmip_handle_now(h);
+    }
     return element.ret;
   }
-  }
-
-  // if (h) {
-  //   int custom = element.execute(h->kmip_ctx, h->bio);
-  //   if (custom != 0) {
-  //     element.ret = custom;
-  //     element.done = true;
-  //     element.cond.notify_all();
-  //     release_kmip_handle(h);
-  //     return element.ret;
-  //   }
-  // }
 
   Attribute a[8], *ap;
   TextString nvalue[1], uvalue[1];
@@ -487,10 +483,6 @@ RGWKmipHandles::do_one_entry(RGWKMIPTransceiver &element)
   enum result_status rs;
   ResponseBatchItem *req;
 
-  if (!h) {
-    element.ret = -ERR_SERVICE_UNAVAILABLE;
-    return element.ret;
-  }
   memset(a, 0, sizeof *a);
   for (i = 0; i < (int)(sizeof a/sizeof *a); ++i)
     kmip_init_attribute(a+i);
@@ -542,7 +534,7 @@ RGWKmipHandles::do_one_entry(RGWKMIPTransceiver &element)
   memset(u, 0, sizeof *u);
   rbi->request_payload = u;
   if (element.operation == RGWKMIPTransceiver::LOCATE) {
-  ldout(cct, 1) << "LOCATE attributes: count=" << (ap - a)
+    ldout(cct, 10) << "LOCATE attributes: count=" << (ap - a)
               << " name=" << (element.name ? element.name : "(null)") << dendl;
   }
   switch(element.operation) {
@@ -553,16 +545,15 @@ RGWKmipHandles::do_one_entry(RGWKMIPTransceiver &element)
     u->create_req->object_type = KMIP_OBJTYPE_SYMMETRIC_KEY;
     u->create_req->template_attribute = ta;
     rbi->operation = KMIP_OP_CREATE;
-    //rbi->request_payload = u->create_req;
     what = "create";
     break;
   
   case RGWKMIPTransceiver::ENCRYPT:
   case RGWKMIPTransceiver::DECRYPT:
-  ldout(cct, 1) << "CUSTOM op=" << element.operation << dendl;
-  element.ret = element.execute(h->kmip_ctx, h->bio);
-  goto Done;  // Skip KMIP encoding, use custom logic
-  break;
+    lderr(cct) << "BUG: custom op reached generic dispatch, op="
+    << element.operation << dendl;
+    element.ret = -EINVAL;
+    goto Done;
 
   case RGWKMIPTransceiver::GET:
     if (element.unique_id)
@@ -751,7 +742,7 @@ RGWKmipWorker::entry()
     auto element = *iter;
     m.requests.erase(iter);
     entry_lock.unlock();
-    ldout(m.cct, 0) << "KMIP WORKER: Processing " << m.requests.size() << " requests" << dendl;
+    ldout(m.cct, 10) << "KMIP WORKER: Processing " << m.requests.size() << " requests" << dendl;
     (void) handles.do_one_entry(element.details);
     entry_lock.lock();
   }
@@ -759,7 +750,7 @@ RGWKmipWorker::entry()
     if (m.requests.empty()) break;
     auto iter = m.requests.begin();
     auto element = std::move(*iter);
-    ldout(m.cct, 0) << "KMIP WORKER: Dispatching op=" << (int)element.details.operation << dendl;
+    ldout(m.cct, 10) << "KMIP WORKER: Dispatching op=" << (int)element.details.operation << dendl;
     m.requests.erase(iter);
     element.details.ret = -666;
     element.details.done = true;
