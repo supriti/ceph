@@ -1065,18 +1065,26 @@ static int make_actual_key_from_kmip(const DoutPrefixProvider *dpp,
 {
   CephContext* cct = dpp->get_cct();
   RGWKmipSSES3* kmip_backend = get_kmip_sse_s3_backend(cct);
-  std::string kek_id = get_str_attribute(attrs, RGW_ATTR_CRYPT_KEYID);
+  if (!kmip_backend) {
+    ldpp_dout(dpp, 0) << "ERROR: KMIP backend not available" << dendl;
+    return -EIO;
+  }
 
-  bufferlist unwrapped_dek;
-  bufferlist wrapped_dek;
+  std::string kek_id = get_str_attribute(attrs, RGW_ATTR_CRYPT_KEYID);
+  bufferlist unwrapped_dek_bl;
+  bufferlist wrapped_dek_bl;
   std::string encryption_context = get_str_attribute(attrs, RGW_ATTR_CRYPT_CONTEXT);
-  
-  kmip_backend->generate_and_wrap_dek(dpp, kek_id, encryption_context, unwrapped_dek, wrapped_dek, y);
-  set_attr(attrs, RGW_ATTR_CRYPT_DATAKEY, wrapped_dek.to_str());
-  actual_key = unwrapped_dek.to_str();
+
+  int r = kmip_backend->generate_and_wrap_dek(dpp, kek_id, encryption_context, unwrapped_dek_bl, wrapped_dek_bl, y);
+  if (r < 0) return r;
+
+  if (wrapped_dek_bl.length() == 0)
+    return -EIO;
+
+  attrs[RGW_ATTR_CRYPT_DATAKEY] = wrapped_dek_bl;
+  actual_key = unwrapped_dek_bl.to_str();
   return 0;
 }
-
 
 static int reconstitute_actual_key_from_vault(const DoutPrefixProvider *dpp,
                                               SSEContext & kctx,
@@ -1097,33 +1105,29 @@ static int reconstitute_actual_key_from_kmip(const DoutPrefixProvider *dpp,
   //TODO: DEEPIKA use existing manager
   RGWKmipSSES3* kmip_backend = get_kmip_sse_s3_backend(cct);
 
-  if (kmip_backend == nullptr) {
+  if (!kmip_backend) {
     ldpp_dout(dpp, 0) << "ERROR: KMIP backend not available" << dendl;
     return -EIO;
   }
 
- // check if there can be duplicates here
   std::string kek_id = get_str_attribute(attrs, RGW_ATTR_CRYPT_KEYID);
-  std::string dek = get_str_attribute(attrs, RGW_ATTR_CRYPT_DATAKEY);
-  bufferlist dek_bl;
-  dek_bl.append(dek);
 
+  auto it = attrs.find(RGW_ATTR_CRYPT_DATAKEY);
+  if (it == attrs.end() || it->second.length() == 0) {
+    ldpp_dout(dpp, 0) << "ERROR: missing or empty wrapped DEK" << dendl;
+    return -EIO;
+  }
+  const bufferlist& dek_bl = it->second;
 
-  bufferlist unwrapped_dek;
   std::string encryption_context = get_str_attribute(attrs, RGW_ATTR_CRYPT_CONTEXT);
+  bufferlist unwrapped_dek_bl;
 
-  int r = kmip_backend->unwrap_dek(dpp, kek_id, dek_bl, encryption_context, unwrapped_dek, y);
+  int r = kmip_backend->unwrap_dek(dpp, kek_id, dek_bl, encryption_context, unwrapped_dek_bl, y);
   if (r < 0) return r;
-    ldpp_dout(dpp, 10) << "reconstitute: unwrapped_dek.length()=" << unwrapped_dek.length() << dendl;
-  
 
-  actual_key.assign(unwrapped_dek.c_str(), unwrapped_dek.length());
-  
-  ldpp_dout(dpp, 10) << "reconstitute: actual_key.size()=" << actual_key.size() << dendl;
-
+  actual_key.assign(unwrapped_dek_bl.c_str(), unwrapped_dek_bl.length());
   return 0;
 }
-
 
 static int get_actual_key_from_kmip(const DoutPrefixProvider *dpp,
                                     std::string_view key_id,

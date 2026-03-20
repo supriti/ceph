@@ -431,7 +431,7 @@ set_source_files_properties(rgw_iam_policy.cc PROPERTIES
 
 add_library(rgw_a STATIC
     ${rgw_a_srcs})
-
+target_include_directories(rgw_common PUBLIC "${CMAKE_SOURCE_DIR}/src/libkmip")
 target_compile_definitions(rgw_a PUBLIC "-DCLS_CLIENT_HIDE_IOCTX")
 
 target_include_directories(rgw_a
