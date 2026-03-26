@@ -6,6 +6,11 @@
 #include <mutex>
 #include <string.h>
 
+#if !defined(_WIN32)
+#include <sys/socket.h>
+#include <sys/time.h>
+#endif
+
 #include "include/compat.h"
 #include "common/errno.h"
 #include "rgw_common.h"
@@ -24,6 +29,23 @@ extern "C" {
 #define dout_subsys ceph_subsys_rgw
 
 static enum kmip_version protocol_version = KMIP_1_0;
+
+#if !defined(_WIN32)
+static void kmip_bio_set_socket_io_timeout(BIO *bio, int seconds)
+{
+  if (!bio || seconds <= 0) {
+    return;
+  }
+  const int fd = BIO_get_fd(bio, nullptr);
+  if (fd < 0) {
+    return;
+  }
+  struct timeval tv = {};
+  tv.tv_sec = seconds;
+  (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+  (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+}
+#endif
 
 struct RGWKmipHandle {
   int uses;
@@ -60,6 +82,13 @@ struct RGWKmipWorker: public Thread {
   }
 };
 
+/*
+ * Tear down KMIP + TLS in dependency order:
+ * 1) release encode buffer and KMIP context
+ * 2) SSL_shutdown (best-effort close_notify) while SSL is still wired to the BIO
+ * 3) BIO_free_all frees SSL and closes the TCP fd
+ * 4) SSL_CTX last
+ */
 static void
 kmip_free_handle_stuff(RGWKmipHandle *kmip)
 {
@@ -71,10 +100,20 @@ kmip_free_handle_stuff(RGWKmipHandle *kmip)
   }
   if (kmip->need_to_free_kmip)
     kmip_destroy(kmip->kmip_ctx);
-  if (kmip->bio)
+  if (kmip->ssl) {
+    int rc = SSL_shutdown(kmip->ssl);
+    if (rc == 0)
+      (void)SSL_shutdown(kmip->ssl);
+  }
+  if (kmip->bio) {
     BIO_free_all(kmip->bio);
-  if (kmip->ctx)
+    kmip->bio = nullptr;
+    kmip->ssl = nullptr;
+  }
+  if (kmip->ctx) {
     SSL_CTX_free(kmip->ctx);
+    kmip->ctx = nullptr;
+  }
 }
 
 class RGWKmipHandleBuilder {
@@ -158,6 +197,10 @@ RGWKmipHandleBuilder::build() const
 	size_t ns;
 
   r->ctx = SSL_CTX_new(TLS_client_method());
+  if (!r->ctx) {
+    lderr(cct) << "SSL_CTX_new failed" << dendl;
+    goto Done;
+  }
 
   if (!clientcert)
     ;
@@ -203,6 +246,18 @@ RGWKmipHandleBuilder::build() const
     goto Done;
   }
 
+#if !defined(_WIN32)
+  {
+    int64_t sec = cct->_conf->rgw_crypt_kmip_socket_io_timeout_sec;
+    if (sec < 0) {
+      sec = 0;
+    } else if (sec > 86400) {
+      sec = 86400;
+    }
+    kmip_bio_set_socket_io_timeout(r->bio, static_cast<int>(sec));
+  }
+#endif
+
   // setup kmip
 
   kmip_init(r->kmip_ctx, NULL, 0, protocol_version);
@@ -236,7 +291,7 @@ RGWKmipHandleBuilder::build() const
     r->credential->credential_value = r->upc;
     int i = kmip_add_credential(r->kmip_ctx, r->credential);
     if (i != KMIP_OK) {
-      fprintf(stderr,"failed to add credential to kmip\n");
+      lderr(cct) << "kmip_add_credential failed err=" << i << dendl;
       goto Done;
     }
   }
@@ -377,7 +432,6 @@ void
 RGWKmipHandles::flush_kmip_handles()
 {
   stop();
-  join();
   if (!saved_kmip.empty()) {
     ldout(cct, 0) << "ERROR: " << __func__ << " failed final cleanup" << dendl;
   }
@@ -436,21 +490,18 @@ RGWKmipHandles::do_one_entry(RGWKMIPTransceiver &element)
 
   if (!h) {
     element.ret = -ERR_SERVICE_UNAVAILABLE;
-    element.done = true;
     element.cond.notify_all();
     return element.ret;
   }
 
   int custom = element.execute(h->kmip_ctx, h->bio);
   if (custom != 0) {
+    // Positive = success, negative = error
+    // Convert positive to 0 for Ceph convention
     element.ret = (custom > 0) ? 0 : custom;
     element.done = true;
     element.cond.notify_all();
-    if (custom > 0) {
-      release_kmip_handle(h);
-    } else {
-      release_kmip_handle_now(h);
-    }
+    release_kmip_handle(h);
     return element.ret;
   }
 
@@ -535,7 +586,7 @@ RGWKmipHandles::do_one_entry(RGWKMIPTransceiver &element)
   rbi->request_payload = u;
   if (element.operation == RGWKMIPTransceiver::LOCATE) {
     ldout(cct, 10) << "LOCATE attributes: count=" << (ap - a)
-              << " name=" << (element.name ? element.name : "(null)") << dendl;
+                   << " name=" << (element.name ? element.name : "(null)") << dendl;
   }
   switch(element.operation) {
   case RGWKMIPTransceiver::CREATE:
@@ -545,13 +596,15 @@ RGWKmipHandles::do_one_entry(RGWKMIPTransceiver &element)
     u->create_req->object_type = KMIP_OBJTYPE_SYMMETRIC_KEY;
     u->create_req->template_attribute = ta;
     rbi->operation = KMIP_OP_CREATE;
+    //rbi->request_payload = u->create_req;
     what = "create";
     break;
-  
+
   case RGWKMIPTransceiver::ENCRYPT:
   case RGWKMIPTransceiver::DECRYPT:
-    lderr(cct) << "BUG: custom op reached generic dispatch, op="
-    << element.operation << dendl;
+    /* Custom execute() already ran above; generic batch path is invalid. */
+    lderr(cct) << "KMIP ENCRYPT/DECRYPT reached generic batch path (internal error) op="
+               << element.operation << dendl;
     element.ret = -EINVAL;
     goto Done;
 
@@ -596,8 +649,8 @@ RGWKmipHandles::do_one_entry(RGWKMIPTransceiver &element)
     h->encoding = static_cast<uint8*>(h->kmip_ctx->calloc_func(h->kmip_ctx->state, h->buffer_blocks, h->buffer_block_size));
     if (!h->encoding) {
       lderr(cct) << "kmip buffer alloc failed: "
-	<< h->buffer_blocks
-	<< " * " << h->buffer_block_size << dendl;
+                 << h->buffer_blocks
+                 << " * " << h->buffer_block_size << dendl;
       element.ret = -ENOMEM;
       goto Done;
     }
@@ -742,7 +795,8 @@ RGWKmipWorker::entry()
     auto element = *iter;
     m.requests.erase(iter);
     entry_lock.unlock();
-    ldout(m.cct, 10) << "KMIP WORKER: Processing " << m.requests.size() << " requests" << dendl;
+    ldout(m.cct, 10) << "KMIP WORKER: remaining queue depth "
+                     << m.requests.size() << dendl;
     (void) handles.do_one_entry(element.details);
     entry_lock.lock();
   }

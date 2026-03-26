@@ -483,7 +483,7 @@ int RGWKmipSSES3::unwrap_dek(const DoutPrefixProvider* dpp,
   return 0;
 }
 
-RGWKmipSSES3* get_kmip_sse_s3_backend(CephContext* cct) {
+RGWKmipSseS3Backend* get_kmip_sse_s3_backend(CephContext* cct) {
   std::unique_lock l{g_kmip_sse_s3_lock};
 
   if (!g_kmip_sse_s3_backend) {

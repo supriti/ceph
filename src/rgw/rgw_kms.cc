@@ -1064,7 +1064,7 @@ static int make_actual_key_from_kmip(const DoutPrefixProvider *dpp,
                                      std::string& actual_key)
 {
   CephContext* cct = dpp->get_cct();
-  RGWKmipSSES3* kmip_backend = get_kmip_sse_s3_backend(cct);
+  RGWKmipSseS3Backend* kmip_backend = get_kmip_sse_s3_backend(cct);
   if (!kmip_backend) {
     ldpp_dout(dpp, 0) << "ERROR: KMIP backend not available" << dendl;
     return -EIO;
@@ -1103,7 +1103,7 @@ static int reconstitute_actual_key_from_kmip(const DoutPrefixProvider *dpp,
 {
   CephContext* cct = dpp->get_cct();
   //TODO: DEEPIKA use existing manager
-  RGWKmipSSES3* kmip_backend = get_kmip_sse_s3_backend(cct);
+  RGWKmipSseS3Backend* kmip_backend = get_kmip_sse_s3_backend(cct);
 
   if (!kmip_backend) {
     ldpp_dout(dpp, 0) << "ERROR: KMIP backend not available" << dendl;
@@ -1327,7 +1327,7 @@ int create_sse_s3_bucket_key(const DoutPrefixProvider *dpp,
 
   if (kms_backend == "kmip") {
     //TODO: DEEPIKA use same manager
-    RGWKmipSSES3* kmip_backend = get_kmip_sse_s3_backend(cct);
+    RGWKmipSseS3Backend* kmip_backend = get_kmip_sse_s3_backend(cct);
     if (!kmip_backend) {
       ldpp_dout(dpp, 0) << "ERROR: KMIP SSE-S3 backend unavailable" << dendl;
       return -EIO;
@@ -1366,7 +1366,7 @@ int remove_sse_s3_bucket_key(const DoutPrefixProvider *dpp,
   const std::string kms_backend { kctx.backend() };
   
   if (kms_backend == "kmip") {
-    RGWKmipSSES3* kmip_backend = get_kmip_sse_s3_backend(cct);
+    RGWKmipSseS3Backend* kmip_backend = get_kmip_sse_s3_backend(cct);
     if (!kmip_backend) {
       ldpp_dout(dpp, 0) << "ERROR: KMIP SSE-S3 backend unavailable" << dendl;
       return -EIO;
