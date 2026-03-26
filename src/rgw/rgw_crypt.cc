@@ -1256,7 +1256,8 @@ int rgw_s3_prepare_encrypt(req_state* s, optional_yield y,
         return res;
       }
 
-      ldpp_dout(s, 5) << "XXX get sse s3 bucket key: " << key_id << dendl;
+      ldpp_dout(s, 10) << "SSE-S3: resolved bucket key id (len=" << key_id.size()
+                       << ")" << dendl;
 
       set_attr(attrs, RGW_ATTR_CRYPT_CONTEXT, cooked_context);
       set_attr(attrs, RGW_ATTR_CRYPT_MODE, "AES256");
@@ -1548,6 +1549,9 @@ int rgw_remove_sse_s3_bucket_key(req_state *s, optional_yield y)
   auto saved_key { fetch_bucket_key_id(s) };
 
   if (backend == "kmip") {
+    if (saved_key.empty()) {
+      return 0;
+    }
     ldpp_dout(s, 5) << "KMIP: Removing bucket KEK: " << saved_key << dendl;
     res = remove_sse_s3_bucket_key(s, saved_key, y);
     if (res != 0) {
