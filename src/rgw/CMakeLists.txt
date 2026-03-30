@@ -152,6 +152,7 @@ set(librgw_common_srcs
   rgw_kmip_client.cc
   rgw_kmip_client_impl.cc
   rgw_kmip_sse_s3.cc
+  rgw_kmip_wrapped_dek.cc
   rgw_url.cc
   rgw_oidc_provider.cc
   rgw_log.cc

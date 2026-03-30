@@ -1004,8 +1004,8 @@ static int get_sse_s3_bucket_key(req_state *s, optional_yield y,
     }
   }
 
-  // 3. Create the key on the KMIP/Vault backend
-  res = create_sse_s3_bucket_key(s, key_id, y);
+  // 3. Create the key on the KMIP/Vault backend (pass bucket name for KMIP key naming)
+  res = create_sse_s3_bucket_key(s, key_id, y, s->bucket->get_name());
   if (res != 0) {
     ldpp_dout(s, 0) << "ERROR: create_sse_s3_bucket_key failed, res=" << res << dendl;
     return res;

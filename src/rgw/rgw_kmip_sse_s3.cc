@@ -3,12 +3,13 @@
 
 #include "rgw_kmip_sse_s3.h"
 #include "rgw_kmip_client_impl.h"
+#include "rgw_kmip_wrapped_dek.h"
 #include "common/errno.h"
 #include "common/async/yield_context.h"
 #include <openssl/err.h>
 #include <openssl/ssl.h>
 #include <openssl/rand.h>
-
+#include <new>
 
 extern "C" {
 #include "kmip.h"
@@ -46,9 +47,9 @@ RGWKmipSSES3::~RGWKmipSSES3() {
 }
 
 int RGWKmipSSES3::initialize() {
-  rgw_kmip_manager = new RGWKMIPManagerImpl(cct);
+  rgw_kmip_manager = new (std::nothrow) RGWKMIPManagerImpl(cct);
   if (!rgw_kmip_manager) {
-    ldout(cct, 0) << "ERROR: Failed to create KMIP manager" << dendl;
+    ldout(cct, 0) << "ERROR: Failed to create KMIP manager (alloc)" << dendl;
     return -ENOMEM;
   }
 
@@ -81,7 +82,8 @@ int RGWKmipSSES3::create_bucket_key(const DoutPrefixProvider* dpp,
 
   int execute(KMIP* ctx, BIO* bio) override {
       ERR_clear_error();
-      kmip_init(ctx, NULL, 0, KMIP_1_4);
+      /* Pooled KMIP ctx is owned by the handle; reset per op (kmip_init would tear down credentials). */
+      kmip_reset(ctx);
 
       if (!kek_id.empty()) {
         return 1;
@@ -144,20 +146,21 @@ int RGWKmipSSES3::create_bucket_key(const DoutPrefixProvider* dpp,
       }
 
       kek_id = std::string(key_id, key_id_size);
-      ldpp_dout(this->dpp, 10) << "KMIP created key: " << kek_id << dendl;
+      ldpp_dout(this->dpp, 10) << "KMIP created key id_len=" << kek_id.length()
+                               << dendl;
 
       ret = kmip_bio_activate_with_context(ctx, bio, key_id);
       if (ret != KMIP_OK) {
-        ldpp_dout(this->dpp, 0) << "KMIP activate failed for " << kek_id
+        ldpp_dout(this->dpp, 0) << "KMIP activate failed id_len=" << kek_id.length()
                                 << ", destroying orphaned key" << dendl;
         kmip_bio_destroy_symmetric_key_with_context(ctx, bio,
           const_cast<char*>(kek_id.c_str()), kek_id.length());
-        kmip_free_buffer(ctx, key_id, key_id_size);
+        ctx->free_func(ctx->state, key_id);
         ERR_clear_error();
         kek_id.clear();
         return -EIO;
       }
-      kmip_free_buffer(ctx, key_id, key_id_size);
+      ctx->free_func(ctx->state, key_id);
 
       return 1;
     }
@@ -185,7 +188,8 @@ int RGWKmipSSES3::create_bucket_key(const DoutPrefixProvider* dpp,
 
   kek_id_out = op.kek_id;
 
-  ldpp_dout(dpp, 10) << "KMIP created and activated KEK: " << kek_id_out << dendl;
+  ldpp_dout(dpp, 10) << "KMIP created and activated KEK id_len=" << kek_id_out.length()
+                     << dendl;
   return 0;
 }
 
@@ -207,13 +211,13 @@ int RGWKmipSSES3::destroy_bucket_key(const DoutPrefixProvider* dpp,
       char* id_ptr = const_cast<char*>(kek_id.c_str());
       int id_len = kek_id.length();
 
-      kmip_init(ctx, NULL, 0, KMIP_1_4);
+      kmip_reset(ctx);
       ERR_clear_error();
 
       int revoke_res = kmip_bio_revoke_with_context(
           ctx, bio, id_ptr, id_len, KMIP_REVOKE_CESSATION_OF_OPERATION);
       if (revoke_res != 0) {
-        ldpp_dout(this->dpp, 5) << "KMIP revoke KEK " << kek_id
+        ldpp_dout(this->dpp, 5) << "KMIP revoke KEK id_len=" << kek_id.length()
                                 << " returned " << revoke_res
                                 << " (proceeding to destroy)" << dendl;
         ERR_clear_error();
@@ -239,7 +243,8 @@ int RGWKmipSSES3::destroy_bucket_key(const DoutPrefixProvider* dpp,
   if (ret < 0) {
     ldpp_dout(dpp, 0) << "Destroy KEK failed: " << cpp_strerror(ret) << dendl;
   } else {
-    ldpp_dout(dpp, 10) << "Successfully destroyed KEK: " << kek_id << dendl;
+    ldpp_dout(dpp, 10) << "Successfully destroyed KEK id_len=" << kek_id.length()
+                       << dendl;
   }
   return ret;
 }
@@ -283,7 +288,7 @@ int RGWKmipSSES3::generate_and_wrap_dek(const DoutPrefixProvider* dpp,
 
     int execute(KMIP* ctx, BIO* bio) override {
       wrapped_dek.clear();
-      kmip_init(ctx, NULL, 0, KMIP_1_4);
+      /* kmip_bio_encrypt_with_context resets ctx at entry */
 
       CryptographicParameters params;
       memset(&params, 0, sizeof(params));
@@ -393,38 +398,30 @@ int RGWKmipSSES3::unwrap_dek(const DoutPrefixProvider* dpp,
       dpp(dpp_in) {}
 
     int execute(KMIP* ctx, BIO* bio) override {
-      kmip_init(ctx, NULL, 0, KMIP_1_4);
+      /* kmip_bio_decrypt_with_context resets ctx at entry */
       plaintext_dek.clear();
 
-      // Header(8) + IV(12) + Tag(16) + min Ciphertext(16) = 52
-      if (wrapped_dek.length() < 52) {
-        ldpp_dout(dpp, 0) << "KMIP ERROR: wrapped_dek too small: "
-                          << wrapped_dek.length() << " bytes" << dendl;
+      if (wrapped_dek.length() < 8) {
+        ldpp_dout(dpp, 0) << "KMIP ERROR: wrapped_dek too small for header"
+                          << dendl;
         return -EINVAL;
       }
 
       std::vector<char> buffer(wrapped_dek.length());
       wrapped_dek.begin().copy(wrapped_dek.length(), buffer.data());
-      const char* raw_data = buffer.data();
-
-      uint32_t iv_size_net, tag_size_net;
-      memcpy(&iv_size_net, raw_data, 4);
-      memcpy(&tag_size_net, raw_data + 4, 4);
-      uint32_t iv_size = ntohl(iv_size_net);
-      uint32_t tag_size = ntohl(tag_size_net);
-
-      const uint8_t* iv_ptr = reinterpret_cast<const uint8_t*>(raw_data + 8);
-      const uint8_t* tag_ptr = iv_ptr + iv_size;
-      const uint8_t* ct_ptr  = tag_ptr + tag_size;
-      int ct_size = wrapped_dek.length() - 8 - iv_size - tag_size;
-
-      if (ct_size <= 0 || tag_size != 16) {
-        ldpp_dout(dpp, 0) << "KMIP ERROR: invalid wrapped DEK header:"
-                          << " iv_size=" << iv_size
-                          << " tag_size=" << tag_size
-                          << " ct_size=" << ct_size << dendl;
+      rgw_kmip_wrapped_dek_parsed layout{};
+      if (rgw_kmip_parse_wrapped_dek(buffer.data(), buffer.size(), &layout)
+          != 0) {
+        ldpp_dout(dpp, 0) << "KMIP ERROR: invalid wrapped DEK layout len="
+                          << buffer.size() << dendl;
         return -EINVAL;
       }
+
+      const uint8_t* iv_ptr = reinterpret_cast<const uint8_t*>(layout.iv_ptr);
+      const uint8_t* tag_ptr = reinterpret_cast<const uint8_t*>(layout.tag_ptr);
+      const uint8_t* ct_ptr =
+          reinterpret_cast<const uint8_t*>(layout.ciphertext_ptr);
+      const int ct_size = layout.ciphertext_size;
 
       CryptographicParameters params;
       memset(&params, 0, sizeof(params));
@@ -444,8 +441,8 @@ int RGWKmipSSES3::unwrap_dek(const DoutPrefixProvider* dpp,
         const_cast<char*>(kek_id.c_str()), (int)kek_id.length(),
         const_cast<uint8_t*>(ct_ptr), ct_size,
         const_cast<uint8_t*>(aad_ptr), aad_len,
-        const_cast<uint8_t*>(iv_ptr), iv_size,
-        const_cast<uint8_t*>(tag_ptr), tag_size,
+        const_cast<uint8_t*>(iv_ptr), static_cast<int>(layout.iv_size),
+        const_cast<uint8_t*>(tag_ptr), static_cast<int>(layout.tag_size),
         &params,
         &plaintext, &plaintext_size
       );
@@ -454,14 +451,15 @@ int RGWKmipSSES3::unwrap_dek(const DoutPrefixProvider* dpp,
         ldpp_dout(dpp, 0) << "KMIP decrypt failed: ret=" << ret
                           << " plaintext_size=" << plaintext_size << dendl;
         if (plaintext) {
-          kmip_free_buffer(ctx, plaintext, plaintext_size);
+          ::ceph::crypto::zeroize_for_security(plaintext, plaintext_size);
+          ctx->free_func(ctx->state, plaintext);
         }
         return -EIO;
       }
 
       plaintext_dek.append(reinterpret_cast<char*>(plaintext), 32);
       ::ceph::crypto::zeroize_for_security(plaintext, plaintext_size);
-      kmip_free_buffer(ctx, plaintext, plaintext_size);
+      ctx->free_func(ctx->state, plaintext);
       return 1;
     }
   };
@@ -487,7 +485,11 @@ RGWKmipSseS3Backend* get_kmip_sse_s3_backend(CephContext* cct) {
   std::unique_lock l{g_kmip_sse_s3_lock};
 
   if (!g_kmip_sse_s3_backend) {
-    g_kmip_sse_s3_backend = new RGWKmipSSES3(cct);
+    g_kmip_sse_s3_backend = new (std::nothrow) RGWKmipSSES3(cct);
+    if (!g_kmip_sse_s3_backend) {
+      ldout(cct, 0) << "Failed to allocate KMIP SSE-S3 backend" << dendl;
+      return nullptr;
+    }
     int ret = g_kmip_sse_s3_backend->initialize();
     if (ret < 0) {
       ldout(cct, 0) << "Failed to initialize KMIP SSE-S3 backend" << dendl;

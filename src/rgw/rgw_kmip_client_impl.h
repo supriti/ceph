@@ -2,6 +2,7 @@
 // vim: ts=8 sw=2 smarttab ft=cpp
 
 #include <boost/intrusive/list.hpp>
+#include <vector>
 #include "common/ceph_mutex.h"
 
 #pragma once
@@ -20,7 +21,7 @@ protected:
   boost::intrusive::list<Request, boost::intrusive::member_hook< Request,
   boost::intrusive::list_member_hook<>, &Request::req_hook>> requests;
   bool going_down = false;
-  RGWKmipWorker *worker = 0;
+  std::vector<RGWKmipWorker*> workers;
 public:
   RGWKMIPManagerImpl(CephContext *cct) : RGWKMIPManager(cct) {};
   int add_request(RGWKMIPTransceiver *);
