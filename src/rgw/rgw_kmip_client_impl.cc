@@ -3,6 +3,8 @@
 
 #include <boost/intrusive/list.hpp>
 #include <atomic>
+#include <cinttypes>
+#include <cstdio>
 #include <mutex>
 #include <string.h>
 
@@ -18,6 +20,7 @@
 #include "rgw_kmip_client_impl.h"
 
 #include <openssl/err.h>
+#include <openssl/opensslv.h>
 #include <openssl/ssl.h>
 extern "C" {
 #include "kmip.h"
@@ -28,7 +31,7 @@ extern "C" {
 #define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_rgw
 
-static enum kmip_version protocol_version = KMIP_1_0;
+static enum kmip_version protocol_version = KMIP_1_4;
 
 #if !defined(_WIN32)
 static void kmip_bio_set_socket_io_timeout(BIO *bio, int seconds)
@@ -76,10 +79,6 @@ struct RGWKmipWorker: public Thread {
   RGWKMIPManagerImpl &m;
   RGWKmipWorker(RGWKMIPManagerImpl& m) : m(m) {}
   void *entry() override;
-  void signal() {
-    std::lock_guard l{m.lock};
-    m.cond.notify_all();
-  }
 };
 
 /*
@@ -229,6 +228,14 @@ RGWKmipHandleBuilder::build() const
     ERR_print_errors_ceph(cct);
     goto Done;
   }
+  if (capath && *capath) {
+    SSL_CTX_set_verify(r->ctx, SSL_VERIFY_PEER, nullptr);
+  }
+
+#if OPENSSL_VERSION_NUMBER >= 0x10100000L && !defined(LIBRESSL_VERSION_NUMBER)
+  SSL_CTX_set_min_proto_version(r->ctx, TLS1_2_VERSION);
+#endif
+
   r->bio = BIO_new_ssl_connect(r->ctx);
   if (!r->bio) {
     lderr(cct) << "BIO_new_ssl_connect failed" << dendl;
@@ -236,6 +243,21 @@ RGWKmipHandleBuilder::build() const
   }
   BIO_get_ssl(r->bio, &r->ssl);
   SSL_set_mode(r->ssl, SSL_MODE_AUTO_RETRY);
+
+  if (host && *host) {
+    if (!SSL_set_tlsext_host_name(r->ssl, host)) {
+      lderr(cct) << "SSL_set_tlsext_host_name failed" << dendl;
+      goto Done;
+    }
+#if OPENSSL_VERSION_NUMBER >= 0x10100000L && !defined(LIBRESSL_VERSION_NUMBER)
+    if (capath && *capath) {
+      if (!SSL_set1_host(r->ssl, host)) {
+        lderr(cct) << "SSL_set1_host failed" << dendl;
+        goto Done;
+      }
+    }
+#endif
+  }
 
   BIO_set_conn_hostname(r->bio, host);
   BIO_set_conn_port(r->bio, portstring);
@@ -441,25 +463,40 @@ RGWKmipHandles::flush_kmip_handles()
 int
 RGWKMIPManagerImpl::start()
 {
-  if (worker) {
+  if (!workers.empty()) {
     lderr(cct) << "kmip worker already started" << dendl;
     return -1;
   }
-  worker = new RGWKmipWorker(*this);
-  worker->create("kmip worker");
+  int64_t n = cct->_conf->rgw_crypt_kmip_worker_threads;
+  if (n < 1) {
+    n = 1;
+  } else if (n > 32) {
+    n = 32;
+  }
+  workers.reserve(static_cast<size_t>(n));
+  for (int64_t i = 0; i < n; ++i) {
+    char name[16];
+    snprintf(name, sizeof(name), "rgwkmip%" PRId64, i);
+    auto *w = new RGWKmipWorker(*this);
+    w->create(name);
+    workers.push_back(w);
+  }
   return 0;
 }
 
 void
 RGWKMIPManagerImpl::stop()
 {
-  going_down = true;
-  if (worker) {
-    worker->signal();
-    worker->join();
-    delete worker;
-    worker = 0;
+  {
+    std::lock_guard l{lock};
+    going_down = true;
+    cond.notify_all();
   }
+  for (auto *w : workers) {
+    w->join();
+    delete w;
+  }
+  workers.clear();
 }
 
 int
@@ -474,11 +511,8 @@ RGWKMIPManagerImpl::add_request(RGWKMIPTransceiver *req)
   // coverity[leaked_storage:SUPPRESS]
   // coverity[uninit_use_in_call:SUPPRESS]
   requests.push_back(*new Request{*req});
+  cond.notify_one();
   l.unlock();
-  if (worker) {
-    ldout(cct, 10) << "add_request(): SIGNALING worker" << dendl;
-    worker->signal();
-  }
   return 0;
 }
 
@@ -586,7 +620,8 @@ RGWKmipHandles::do_one_entry(RGWKMIPTransceiver &element)
   rbi->request_payload = u;
   if (element.operation == RGWKMIPTransceiver::LOCATE) {
     ldout(cct, 10) << "LOCATE attributes: count=" << (ap - a)
-                   << " name=" << (element.name ? element.name : "(null)") << dendl;
+                   << " name_len="
+                   << (element.name ? strlen(element.name) : 0) << dendl;
   }
   switch(element.operation) {
   case RGWKMIPTransceiver::CREATE:
@@ -792,23 +827,26 @@ RGWKmipWorker::entry()
       continue;
     }
     auto iter = m.requests.begin();
-    auto element = *iter;
+    RGWKMIPManagerImpl::Request *node = &*iter;
     m.requests.erase(iter);
     entry_lock.unlock();
     ldout(m.cct, 10) << "KMIP WORKER: remaining queue depth "
                      << m.requests.size() << dendl;
-    (void) handles.do_one_entry(element.details);
+    (void) handles.do_one_entry(node->details);
+    delete node;
     entry_lock.lock();
   }
   for (;;) {
     if (m.requests.empty()) break;
     auto iter = m.requests.begin();
-    auto element = std::move(*iter);
-    ldout(m.cct, 10) << "KMIP WORKER: Dispatching op=" << (int)element.details.operation << dendl;
+    RGWKMIPManagerImpl::Request *node = &*iter;
+    ldout(m.cct, 10) << "KMIP WORKER: Dispatching op="
+                     << (int)node->details.operation << dendl;
     m.requests.erase(iter);
-    element.details.ret = -666;
-    element.details.done = true;
-    element.details.cond.notify_all();
+    node->details.ret = -666;
+    node->details.done = true;
+    node->details.cond.notify_all();
+    delete node;
   }
   handles.stop();
   ldout(m.cct, 10) << __func__ << " finish" << dendl;

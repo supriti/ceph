@@ -8,6 +8,7 @@
 #pragma once
 
 #include <string>
+#include <string_view>
 
 static const std::string RGW_SSE_KMS_BACKEND_TESTING = "testing";
 static const std::string RGW_SSE_KMS_BACKEND_BARBICAN = "barbican";
@@ -51,7 +52,8 @@ int reconstitute_actual_key_from_sse_s3(const DoutPrefixProvider *dpp,
 
 int create_sse_s3_bucket_key(const DoutPrefixProvider *dpp,
                              std::string& actual_key,
-                             optional_yield y);
+                             optional_yield y,
+                             std::string_view sse_s3_bucket_name = {});
 
 int remove_sse_s3_bucket_key(const DoutPrefixProvider *dpp,
                              const std::string& actual_key,
