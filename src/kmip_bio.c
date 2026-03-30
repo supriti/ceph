@@ -857,10 +857,14 @@ int kmip_bio_create_symmetric_key_with_context(KMIP *ctx, BIO *bio,
     
     kmip_set_buffer(ctx, NULL, 0);
     uint8 *extended = ctx->realloc_func(ctx->state, encoding, buffer_total_size + length);
-    if(encoding != extended)
+    if(extended == NULL)
     {
-        encoding = extended;
+        kmip_free_buffer(ctx, encoding, buffer_total_size);
+        encoding = NULL;
+        kmip_set_buffer(ctx, NULL, 0);
+        return(KMIP_MEMORY_ALLOC_FAILED);
     }
+    encoding = extended;
     ctx->memset_func(encoding + buffer_total_size, 0, length);
     
     buffer_block_size += length;
@@ -910,25 +914,37 @@ int kmip_bio_create_symmetric_key_with_context(KMIP *ctx, BIO *bio,
         kmip_free_buffer(ctx, encoding, buffer_total_size);
         encoding = NULL;
         kmip_set_buffer(ctx, NULL, 0);
-        kmip_destroy(ctx);
         return(result);
     }
     
-    if (result == KMIP_STATUS_SUCCESS)
     {
         CreateResponsePayload *pld = (CreateResponsePayload *)resp_item.response_payload;
-        if (pld)
+        TextString *unique_identifier = (pld != NULL) ? pld->unique_identifier : NULL;
+        if(unique_identifier == NULL || unique_identifier->value == NULL ||
+           unique_identifier->size == 0)
         {
-            TextString *unique_identifier = pld->unique_identifier;
-
-            char *result_id = ctx->calloc_func(ctx->state, 1, unique_identifier->size);
-            *id_size = unique_identifier->size;
-            for(int i = 0; i < *id_size; i++)
-            {
-                result_id[i] = unique_identifier->value[i];
-            }
-            *id = result_id;
+            kmip_free_response_message(ctx, &resp_m);
+            kmip_free_buffer(ctx, encoding, buffer_total_size);
+            encoding = NULL;
+            kmip_set_buffer(ctx, NULL, 0);
+            return(KMIP_INVALID_FIELD);
         }
+
+        char *result_id = ctx->calloc_func(ctx->state, 1, unique_identifier->size);
+        if(result_id == NULL)
+        {
+            kmip_free_response_message(ctx, &resp_m);
+            kmip_free_buffer(ctx, encoding, buffer_total_size);
+            encoding = NULL;
+            kmip_set_buffer(ctx, NULL, 0);
+            return(KMIP_MEMORY_ALLOC_FAILED);
+        }
+        *id_size = unique_identifier->size;
+        for(int i = 0; i < *id_size; i++)
+        {
+            result_id[i] = unique_identifier->value[i];
+        }
+        *id = result_id;
     }
     
     /* Clean up the response message and the encoding buffer. */
@@ -1442,10 +1458,14 @@ int kmip_bio_send_request_encoding(KMIP *ctx, BIO *bio,
     kmip_set_buffer(ctx, NULL, 0);
     uint8 *extended = ctx->realloc_func(ctx->state, encoding,
                                         buffer_total_size + length);
-    if(encoding != extended)
+    if(extended == NULL)
     {
-        encoding = extended;
+        kmip_free_buffer(ctx, encoding, buffer_total_size);
+        encoding = NULL;
+        kmip_set_buffer(ctx, NULL, 0);
+        return(KMIP_MEMORY_ALLOC_FAILED);
     }
+    encoding = extended;
     ctx->memset_func(encoding + buffer_total_size, 0, length);
     
     buffer_block_size += length;
@@ -1716,9 +1736,6 @@ int kmip_bio_activate_with_context(KMIP *ctx, BIO *bio, char* key_uuid)
         return(encode_result);
     }
 
-    kmip_print_request_message(stdout, &request_message);
-    printf("\n");
-
     /* Step 3: Send request and receive response */
     char *response_buffer = NULL;
     int response_size = 0;
@@ -1750,9 +1767,6 @@ int kmip_bio_activate_with_context(KMIP *ctx, BIO *bio, char* key_uuid)
         kmip_set_buffer(ctx, NULL, 0);
         return(decode_result);
     }
-
-    kmip_print_response_message(stdout, &response_message);
-    printf("\n");
 
     if(response_message.batch_count != 1 || response_message.batch_items == NULL)
     {
@@ -1913,10 +1927,6 @@ kmip_bio_encrypt_with_context(
         return(encode_result);
     }
 
-    kmip_print_request_message(stdout, &request_message);
-    printf("\n");
-
-
     /* Step 3: Send request and receive response */
 
     char *response_buffer = NULL;
@@ -1951,9 +1961,6 @@ kmip_bio_encrypt_with_context(
         kmip_set_buffer(ctx, NULL, 0);
         return(decode_result);
     }
-
-    kmip_print_response_message(stdout, &response_message);
-    printf("\n");
 
     if(response_message.batch_count != 1 || response_message.batch_items == NULL)
     {
@@ -2261,11 +2268,6 @@ kmip_bio_decrypt_with_context(
         return(encode_result);
     }
 
-    printf("--- DEBUG: PRE-ENCODE STRUCTURE ---\n");
-    kmip_print_request_message(stdout, &request_message);
-    printf("\n");
-    fflush(stdout);
-
     /* Step 3: Send request and receive response */
     char *response_buffer = NULL;
     int response_size = 0;
@@ -2300,9 +2302,6 @@ kmip_bio_decrypt_with_context(
         kmip_set_buffer(ctx, NULL, 0);
         return(decode_result);
     }
-
-    kmip_print_response_message(stdout, &response_message);
-    printf("\n");
 
     if(response_message.batch_count != 1 || response_message.batch_items == NULL)
     {
