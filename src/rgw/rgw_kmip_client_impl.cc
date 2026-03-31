@@ -513,7 +513,7 @@ RGWKmipHandles::do_one_entry(RGWKMIPTransceiver &element)
     element.ret = (custom > 0) ? 0 : custom;
     element.done = true;
     element.cond.notify_all();
-    release_kmip_handle(h);
+    release_kmip_handle_now(h);
     return element.ret;
   }
 
@@ -788,7 +788,7 @@ Done:
     kmip_free_response_message(h->kmip_ctx, resp_m);
   element.done = true;
   element.cond.notify_all();
-  release_kmip_handle(h);
+  release_kmip_handle_now(h);
   return element.ret;
 }
 
