@@ -20,7 +20,6 @@
 #include "rgw_kmip_client_impl.h"
 
 #include <openssl/err.h>
-#include <openssl/opensslv.h>
 #include <openssl/ssl.h>
 extern "C" {
 #include "kmip.h"
@@ -228,13 +227,6 @@ RGWKmipHandleBuilder::build() const
     ERR_print_errors_ceph(cct);
     goto Done;
   }
-  if (capath && *capath) {
-    SSL_CTX_set_verify(r->ctx, SSL_VERIFY_PEER, nullptr);
-  }
-
-#if OPENSSL_VERSION_NUMBER >= 0x10100000L && !defined(LIBRESSL_VERSION_NUMBER)
-  SSL_CTX_set_min_proto_version(r->ctx, TLS1_2_VERSION);
-#endif
 
   r->bio = BIO_new_ssl_connect(r->ctx);
   if (!r->bio) {
@@ -243,21 +235,6 @@ RGWKmipHandleBuilder::build() const
   }
   BIO_get_ssl(r->bio, &r->ssl);
   SSL_set_mode(r->ssl, SSL_MODE_AUTO_RETRY);
-
-  if (host && *host) {
-    if (!SSL_set_tlsext_host_name(r->ssl, host)) {
-      lderr(cct) << "SSL_set_tlsext_host_name failed" << dendl;
-      goto Done;
-    }
-#if OPENSSL_VERSION_NUMBER >= 0x10100000L && !defined(LIBRESSL_VERSION_NUMBER)
-    if (capath && *capath) {
-      if (!SSL_set1_host(r->ssl, host)) {
-        lderr(cct) << "SSL_set1_host failed" << dendl;
-        goto Done;
-      }
-    }
-#endif
-  }
 
   BIO_set_conn_hostname(r->bio, host);
   BIO_set_conn_port(r->bio, portstring);
@@ -524,6 +501,7 @@ RGWKmipHandles::do_one_entry(RGWKMIPTransceiver &element)
 
   if (!h) {
     element.ret = -ERR_SERVICE_UNAVAILABLE;
+    element.done = true;
     element.cond.notify_all();
     return element.ret;
   }
@@ -829,9 +807,9 @@ RGWKmipWorker::entry()
     auto iter = m.requests.begin();
     RGWKMIPManagerImpl::Request *node = &*iter;
     m.requests.erase(iter);
-    entry_lock.unlock();
     ldout(m.cct, 10) << "KMIP WORKER: remaining queue depth "
                      << m.requests.size() << dendl;
+    entry_lock.unlock();
     (void) handles.do_one_entry(node->details);
     delete node;
     entry_lock.lock();
@@ -843,7 +821,7 @@ RGWKmipWorker::entry()
     ldout(m.cct, 10) << "KMIP WORKER: Dispatching op="
                      << (int)node->details.operation << dendl;
     m.requests.erase(iter);
-    node->details.ret = -666;
+    node->details.ret = -ECANCELED;
     node->details.done = true;
     node->details.cond.notify_all();
     delete node;

@@ -71,5 +71,7 @@ public:
   virtual int add_request(RGWKMIPTransceiver*) = 0;
 };
 
+extern RGWKMIPManager *rgw_kmip_manager;
+
 void rgw_kmip_client_init(RGWKMIPManager &);
 void rgw_kmip_client_cleanup();

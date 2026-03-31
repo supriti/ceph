@@ -41,12 +41,15 @@ RGWKmipSSES3::RGWKmipSSES3(CephContext* cct)
 }
 
 RGWKmipSSES3::~RGWKmipSSES3() {
-  if (rgw_kmip_manager) {
-    rgw_kmip_manager->stop();
-  }
+  // KMIP manager lifetime is owned by rgw_kmip_client_init / rgw_kmip_client_cleanup.
 }
 
 int RGWKmipSSES3::initialize() {
+  if (rgw_kmip_manager) {
+    ldout(cct, 10) << "KMIP SSE-S3 reusing global KMIP manager" << dendl;
+    return 0;
+  }
+
   rgw_kmip_manager = new (std::nothrow) RGWKMIPManagerImpl(cct);
   if (!rgw_kmip_manager) {
     ldout(cct, 0) << "ERROR: Failed to create KMIP manager (alloc)" << dendl;
@@ -61,8 +64,8 @@ int RGWKmipSSES3::initialize() {
     rgw_kmip_manager = nullptr;
     return ret;
   }
-  
-  ldout(cct, 10) << "KMIP SSE-S3 backend initialized" << dendl;
+
+  ldout(cct, 10) << "KMIP SSE-S3 backend initialized standalone KMIP manager" << dendl;
   return 0;
 }
 
@@ -236,7 +239,7 @@ int RGWKmipSSES3::destroy_bucket_key(const DoutPrefixProvider* dpp,
 
   DestroyKey op(dpp->get_cct(), kek_id, dpp);
 
-  int ret = this->rgw_kmip_manager->add_request(&op);
+  int ret = rgw_kmip_manager->add_request(&op);
   if (ret < 0) return ret;
 
   ret = op.wait(dpp, y);
@@ -466,7 +469,7 @@ int RGWKmipSSES3::unwrap_dek(const DoutPrefixProvider* dpp,
 
   UnwrapDEK op(cct, kek_id, wrapped_dek, encryption_context, dpp);
 
-  int ret = this->rgw_kmip_manager->add_request(&op);
+  int ret = rgw_kmip_manager->add_request(&op);
   if (ret < 0) return ret;
 
   ret = op.wait(dpp, y);
