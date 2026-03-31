@@ -23,7 +23,6 @@
 class RGWKmipSSES3 : public RGWKmipSseS3Backend {
 private:
   CephContext* cct;
-  RGWKMIPManager* rgw_kmip_manager;  // Reuse existing KMIP connection management
 
 public:
   RGWKmipSSES3(CephContext* cct);
