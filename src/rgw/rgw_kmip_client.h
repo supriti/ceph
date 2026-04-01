@@ -73,5 +73,7 @@ public:
 
 extern RGWKMIPManager *rgw_kmip_manager;
 
+/** Install global KMIP manager and start worker threads (see RGWKMIPManager::start). */
 void rgw_kmip_client_init(RGWKMIPManager &);
+
 void rgw_kmip_client_cleanup();

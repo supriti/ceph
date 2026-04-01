@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cinttypes>
 #include <cstdio>
+#include <memory>
 #include <mutex>
 #include <string.h>
 
@@ -454,9 +455,9 @@ RGWKMIPManagerImpl::start()
   for (int64_t i = 0; i < n; ++i) {
     char name[16];
     snprintf(name, sizeof(name), "rgwkmip%" PRId64, i);
-    auto *w = new RGWKmipWorker(*this);
+    auto w = std::make_unique<RGWKmipWorker>(*this);
     w->create(name);
-    workers.push_back(w);
+    workers.push_back(std::move(w));
   }
   return 0;
 }
@@ -469,9 +470,8 @@ RGWKMIPManagerImpl::stop()
     going_down = true;
     cond.notify_all();
   }
-  for (auto *w : workers) {
+  for (auto& w : workers) {
     w->join();
-    delete w;
   }
   workers.clear();
 }

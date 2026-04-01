@@ -1527,7 +1527,7 @@ int rgw_remove_sse_s3_bucket_key(req_state *s, optional_yield y)
     if (saved_key.empty()) {
       return 0;
     }
-    ldpp_dout(s, 5) << "KMIP: Removing bucket KEK: " << saved_key << dendl;
+    ldpp_dout(s, 5) << "KMIP: Removing bucket KEK: " << saved_key.length() << dendl;
     res = remove_sse_s3_bucket_key(s, saved_key, y);
     if (res != 0) {
       ldpp_dout(s, 0) << "ERROR: KMIP failed to remove KEK: " << saved_key << dendl;
