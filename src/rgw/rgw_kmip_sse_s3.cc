@@ -202,7 +202,7 @@ int RGWKmipSSES3::destroy_bucket_key(const DoutPrefixProvider* dpp,
                                       optional_yield y) {
 
   struct DestroyKey : public RGWKMIPTransceiver {
-    const std::string& kek_id;
+    std::string kek_id;
     const DoutPrefixProvider* dpp;
 
     DestroyKey(CephContext* cct, const std::string& kek, const DoutPrefixProvider* dpp_in)
@@ -272,7 +272,7 @@ int RGWKmipSSES3::generate_and_wrap_dek(const DoutPrefixProvider* dpp,
 
   // Wrap DEK with KMIP
   struct WrapDEK : public RGWKMIPTransceiver {
-    const std::string& kek_id;
+    std::string kek_id;
     const unsigned char* dek_ptr;
     std::string encryption_context;
     bufferlist wrapped_dek;
@@ -387,8 +387,8 @@ int RGWKmipSSES3::unwrap_dek(const DoutPrefixProvider* dpp,
   }
 
   struct UnwrapDEK : public RGWKMIPTransceiver {
-    const std::string& kek_id;
-    const bufferlist& wrapped_dek;
+    std::string kek_id;
+    bufferlist wrapped_dek;
     std::string encryption_context;
     bufferlist plaintext_dek;
     const DoutPrefixProvider* dpp;
