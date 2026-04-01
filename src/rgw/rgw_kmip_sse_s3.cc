@@ -268,7 +268,6 @@ int RGWKmipSSES3::generate_and_wrap_dek(const DoutPrefixProvider* dpp,
   }
 
   plaintext_dek_out.clear();
-  plaintext_dek_out.append((char*)dek, 32);
 
   // Wrap DEK with KMIP
   struct WrapDEK : public RGWKMIPTransceiver {
@@ -363,12 +362,14 @@ int RGWKmipSSES3::generate_and_wrap_dek(const DoutPrefixProvider* dpp,
   }
 
   ret = op.wait(dpp, y);
-  // Always zero sensitive data
-  explicit_bzero(dek, 32);
   if (ret < 0) {
+    explicit_bzero(dek, 32);
     ldpp_dout(dpp, 0) << "KMIP wrap DEK failed" << dendl;
     return ret;
   }
+
+  plaintext_dek_out.append((char*)dek, 32);
+  explicit_bzero(dek, 32);
 
   wrapped_dek_out = std::move(op.wrapped_dek);
   ldpp_dout(dpp, 10) << "KMIP wrapped DEK, size=" << wrapped_dek_out.length() << dendl;
