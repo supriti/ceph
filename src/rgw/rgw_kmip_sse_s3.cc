@@ -32,7 +32,6 @@ enum KmipRevocationReason {
   KMIP_REVOKE_PRIVILEGE_WITHDRAWN      = 7,
 };
 
-// Global singleton
 static RGWKmipSSES3* g_kmip_sse_s3_backend = nullptr;
 static ceph::mutex g_kmip_sse_s3_lock = ceph::make_mutex("kmip_sse_s3");
 
@@ -41,7 +40,7 @@ RGWKmipSSES3::RGWKmipSSES3(CephContext* cct)
 }
 
 RGWKmipSSES3::~RGWKmipSSES3() {
-  // KMIP manager lifetime is owned by rgw_kmip_client_init / rgw_kmip_client_cleanup.
+ // KMIP manager lifetime is owned by rgw_kmip_client_init / rgw_kmip_client_cleanup.
 }
 
 int RGWKmipSSES3::initialize() {
@@ -504,7 +503,8 @@ RGWKmipSseS3Backend* get_kmip_sse_s3_backend(CephContext* cct) {
   return g_kmip_sse_s3_backend;
 }
 
-void cleanup_kmip_sse_s3_backend() {
+void cleanup_kmip_sse_s3_backend()
+{
   std::unique_lock l{g_kmip_sse_s3_lock};
   if (g_kmip_sse_s3_backend) {
     delete g_kmip_sse_s3_backend;

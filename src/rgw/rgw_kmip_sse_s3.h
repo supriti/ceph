@@ -26,7 +26,7 @@ private:
 
 public:
   RGWKmipSSES3(CephContext* cct);
-  ~RGWKmipSSES3() override;
+  ~RGWKmipSSES3() override = default;
 
   int initialize();
 
@@ -55,4 +55,5 @@ public:
 };
 
 RGWKmipSseS3Backend* get_kmip_sse_s3_backend(CephContext* cct);
+
 void cleanup_kmip_sse_s3_backend();

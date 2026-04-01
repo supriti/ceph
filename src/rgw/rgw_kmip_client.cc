@@ -7,6 +7,7 @@
 #include "rgw_asio_thread.h"
 #include "rgw_common.h"
 #include "rgw_kmip_client.h"
+#include "rgw_kmip_sse_s3.h"
 
 #include <atomic>
 
@@ -82,6 +83,12 @@ rgw_kmip_client_init(RGWKMIPManager &m)
 void
 rgw_kmip_client_cleanup()
 {
-  rgw_kmip_manager->stop();
-  delete rgw_kmip_manager;
+  if (rgw_kmip_manager) {
+    rgw_kmip_manager->stop();
+  }
+  cleanup_kmip_sse_s3_backend();
+  if (rgw_kmip_manager) {
+    delete rgw_kmip_manager;
+    rgw_kmip_manager = nullptr;
+  }
 }
