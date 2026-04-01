@@ -39,10 +39,6 @@ RGWKmipSSES3::RGWKmipSSES3(CephContext* cct)
   : cct(cct) {
 }
 
-RGWKmipSSES3::~RGWKmipSSES3() {
- // KMIP manager lifetime is owned by rgw_kmip_client_init / rgw_kmip_client_cleanup.
-}
-
 int RGWKmipSSES3::initialize() {
   if (rgw_kmip_manager) {
     ldout(cct, 10) << "KMIP SSE-S3 reusing global KMIP manager" << dendl;
@@ -173,6 +169,9 @@ int RGWKmipSSES3::create_bucket_key(const DoutPrefixProvider* dpp,
     return -EINVAL;
   }
 
+  /* Key name is derived from bucket name only. If a bucket is deleted and
+   * recreated with the same name, the KMIP server may still hold a key with
+   * this name; create may fail or behave as policy dictates. */
   const std::string key_template = "rgw-kek-" + bucket_name;
   CreateAndActivateKey op(dpp->get_cct(), key_template, dpp);
 
