@@ -1324,7 +1324,6 @@ int rgw_s3_prepare_decrypt(req_state* s, optional_yield y,
                            std::map<std::string, std::string>& crypt_http_responses)
 {
   int res = 0;
-  std::string actual_key;
   std::string stored_mode = get_str_attribute(attrs, RGW_ATTR_CRYPT_MODE);
   ldpp_dout(s, 15) << "Encryption mode: " << stored_mode << dendl;
   
