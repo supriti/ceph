@@ -81,6 +81,16 @@ struct RGWKmipWorker: public Thread {
   void *entry() override;
 };
 
+struct RGWKmipWorkerPool {
+  std::vector<std::unique_ptr<RGWKmipWorker>> workers;
+};
+
+RGWKMIPManagerImpl::RGWKMIPManagerImpl(CephContext *cct)
+  : RGWKMIPManager(cct),
+    worker_pool(std::make_unique<RGWKmipWorkerPool>()) {}
+
+RGWKMIPManagerImpl::~RGWKMIPManagerImpl() = default;
+
 /*
  * Tear down KMIP + TLS in dependency order:
  * 1) release encode buffer and KMIP context
@@ -441,6 +451,7 @@ RGWKmipHandles::flush_kmip_handles()
 int
 RGWKMIPManagerImpl::start()
 {
+  auto& workers = worker_pool->workers;
   if (!workers.empty()) {
     lderr(cct) << "kmip worker already started" << dendl;
     return -1;
@@ -470,6 +481,7 @@ RGWKMIPManagerImpl::stop()
     going_down = true;
     cond.notify_all();
   }
+  auto& workers = worker_pool->workers;
   for (auto& w : workers) {
     w->join();
   }

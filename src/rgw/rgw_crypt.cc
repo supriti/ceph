@@ -1530,12 +1530,13 @@ int rgw_remove_sse_s3_bucket_key(req_state *s, optional_yield y)
     ldpp_dout(s, 5) << "KMIP: Removing bucket KEK: " << saved_key.length() << dendl;
     res = remove_sse_s3_bucket_key(s, saved_key, y);
     if (res != 0) {
-      ldpp_dout(s, 0) << "ERROR: KMIP failed to remove KEK: " << saved_key << dendl;
+      ldpp_dout(s, 0) << "ERROR: KMIP failed to remove KEK id_len=" << saved_key.length()
+                      << dendl;
     }
     return res;
   }
 
-  if  (backend  == "vault") {
+  if (backend == "vault") {
     size_t i;
     auto key_id{expand_key_name(s, s->cct->_conf->rgw_crypt_sse_s3_key_template)};
     if (key_id == cant_expand_key) {
@@ -1549,19 +1550,19 @@ int rgw_remove_sse_s3_bucket_key(req_state *s, optional_yield y)
     if (saved_key == "") {
       return 0;
     } else if (saved_key != key_id) {
-      ldpp_dout(s, 5) << "Found but will not delete strange KEK ID: " << saved_key
+      ldpp_dout(s, 5) << "Found but will not delete strange KEK id_len=" << saved_key.length()
                       << dendl;
       return 0;
     }
     i = s->cct->_conf->rgw_crypt_sse_s3_key_template.find("%bucket_id");
     if (i == std::string_view::npos) {
-      ldpp_dout(s, 5) << "Kept valid KEK ID: " << saved_key << dendl;
+      ldpp_dout(s, 5) << "Kept valid KEK id_len=" << saved_key.length() << dendl;
       return 0;
     }
-    ldpp_dout(s, 5) << "Removing valid KEK ID: " << saved_key << dendl;
+    ldpp_dout(s, 5) << "Removing valid KEK id_len=" << saved_key.length() << dendl;
     res = remove_sse_s3_bucket_key(s, saved_key, y);
     if (res != 0) {
-      ldpp_dout(s, 0) << "ERROR: Unable to remove KEK ID: " << saved_key
+      ldpp_dout(s, 0) << "ERROR: Unable to remove KEK id_len=" << saved_key.length()
                       << " got " << res << dendl;
     }
     return res;

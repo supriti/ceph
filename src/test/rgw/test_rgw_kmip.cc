@@ -116,5 +116,5 @@ TEST(RgwKmipSseS3Backend, MockCreateReturnsValue)
   int r = mock.create_bucket_key(&no_dpp, "bucket", out, null_yield);
   ASSERT_EQ(r, 0);
   EXPECT_EQ(out, "test-kek-id");
-  delete cct;
+  cct->put();
 }
