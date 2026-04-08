@@ -29,14 +29,14 @@ int rgw_kmip_parse_wrapped_dek(const char *raw, size_t len,
   if (need > len || tag_size != 16) {
     return -EINVAL;
   }
-  const int ct_size = static_cast<int>(len - 8 - iv_size - tag_size);
-  if (ct_size <= 0) {
+  const size_t ct_size = len - 8 - iv_size - tag_size;
+  if (ct_size == 0 || ct_size > UINT32_MAX) {
     return -EINVAL;
   }
 
   out->iv_size = iv_size;
   out->tag_size = tag_size;
-  out->ciphertext_size = ct_size;
+  out->ciphertext_size = static_cast<uint32_t>(ct_size);
   out->iv_ptr = raw + 8;
   out->tag_ptr = out->iv_ptr + iv_size;
   out->ciphertext_ptr = out->tag_ptr + tag_size;

@@ -986,7 +986,6 @@ static int get_sse_s3_bucket_key(req_state *s, optional_yield y,
 {
   int res = 0;
   std::string saved_key = fetch_bucket_key_id(s);
-  const std::string& backend = s->cct->_conf->rgw_crypt_sse_s3_backend;
 
   // 1. Return existing key if metadata is already present
   if (!saved_key.empty()) {
@@ -994,8 +993,9 @@ static int get_sse_s3_bucket_key(req_state *s, optional_yield y,
     return 0;
   }
 
+  const std::string& backend = s->cct->_conf->rgw_crypt_sse_s3_backend;
   // 2. Expand key name for Vault if necessary
-  if (backend == "vault") {
+  if (backend == RGW_SSE_KMS_BACKEND_VAULT) {
     key_id = expand_key_name(s, s->cct->_conf->rgw_crypt_sse_s3_key_template);
     if (key_id == cant_expand_key) {
       ldpp_dout(s, 5) << "ERROR: unable to expand key_id template" << dendl;
@@ -1037,8 +1037,18 @@ static int get_sse_s3_bucket_key(req_state *s, optional_yield y,
   }
 
   if (res != 0) {
-    ldpp_dout(s, 5) << "ERROR: unable to save key_id on bucket metadata" << dendl;
+    ldpp_dout(s, 0) << "ERROR: unable to save key_id on bucket metadata" << dendl;
     s->err.message = "Server side error - unable to save key_id";
+    /* The key was created on the backend but we failed to persist its ID.
+     * Best-effort cleanup to avoid orphaning the key on the KMS server. */
+    if (!key_id.empty()) {
+      int cleanup_res = remove_sse_s3_bucket_key(s, key_id, y);
+      if (cleanup_res != 0) {
+        ldpp_dout(s, 0) << "ERROR: failed to clean up orphaned backend key after "
+                           "metadata save failure (id_len=" << key_id.size()
+                        << "); manual cleanup may be required" << dendl;
+      }
+    }
   }
 
   return res;
@@ -1224,7 +1234,8 @@ int rgw_s3_prepare_encrypt(req_state* s, optional_yield y,
         return -EINVAL;
       }
 
-      if (s->cct->_conf->rgw_crypt_sse_s3_backend != "vault" && s->cct->_conf->rgw_crypt_sse_s3_backend != "kmip") {
+      if (s->cct->_conf->rgw_crypt_sse_s3_backend != RGW_SSE_KMS_BACKEND_VAULT &&
+          s->cct->_conf->rgw_crypt_sse_s3_backend != RGW_SSE_KMS_BACKEND_KMIP) {
         s->err.message = "Request specifies Server Side Encryption "
             "but server configuration does not support this.";
         return -EINVAL;
@@ -1523,7 +1534,7 @@ int rgw_remove_sse_s3_bucket_key(req_state *s, optional_yield y)
   const std::string& backend = s->cct->_conf->rgw_crypt_sse_s3_backend;
   auto saved_key { fetch_bucket_key_id(s) };
 
-  if (backend == "kmip") {
+  if (backend == RGW_SSE_KMS_BACKEND_KMIP) {
     if (saved_key.empty()) {
       return 0;
     }
@@ -1536,7 +1547,7 @@ int rgw_remove_sse_s3_bucket_key(req_state *s, optional_yield y)
     return res;
   }
 
-  if (backend == "vault") {
+  if (backend == RGW_SSE_KMS_BACKEND_VAULT) {
     size_t i;
     auto key_id{expand_key_name(s, s->cct->_conf->rgw_crypt_sse_s3_key_template)};
     if (key_id == cant_expand_key) {

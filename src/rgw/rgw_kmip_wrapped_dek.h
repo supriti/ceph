@@ -13,7 +13,7 @@
 struct rgw_kmip_wrapped_dek_parsed {
   uint32_t iv_size = 0;
   uint32_t tag_size = 0;
-  int ciphertext_size = 0;
+  uint32_t ciphertext_size = 0;
   const char *iv_ptr = nullptr;
   const char *tag_ptr = nullptr;
   const char *ciphertext_ptr = nullptr;

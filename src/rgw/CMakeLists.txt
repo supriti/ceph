@@ -321,11 +321,9 @@ target_link_libraries(rgw_common
     ${LUA_LIBRARIES}
     RapidJSON::RapidJSON
     Boost::context
-    Boost::url
     kmip
     ${FMT_LIB}
     OpenSSL::SSL
-    thrift
     BLAKE3::blake3)
 target_include_directories(rgw_common
   PUBLIC "${CMAKE_SOURCE_DIR}/src/rgw/services"

@@ -2935,10 +2935,10 @@ options:
   type: str
   level: advanced
   desc: Where the SSE-KMS encryption keys are stored. Supported KMS systems are OpenStack
-    Barbican ('barbican', the default) and HashiCorp Vault ('vault').
+    Barbican ('barbican', the default), HashiCorp Vault ('vault'), and KMIP ('kmip').
   fmt_desc: Where the SSE-KMS encryption keys are stored. Supported KMS
-    systems are OpenStack Barbican (``barbican``, the default) and
-    HashiCorp Vault (``vault``).
+    systems are OpenStack Barbican (``barbican``, the default),
+    HashiCorp Vault (``vault``), and KMIP (``kmip``).
   default: barbican
   services:
   - rgw
@@ -3121,11 +3121,11 @@ options:
   desc: KMIP TLS per-socket read/write timeout (SO_RCVTIMEO/SO_SNDTIMEO), seconds
   long_desc: >
     Applied after TCP+TLS connect on the BIO used for KMIP. Limits how long
-    each socket recv/send may block. Use 0 to disable (wait indefinitely).
-    Does not bound total KMIP request time by itself.
+    each socket recv/send may block. Use 0 to disable (falls back to the
+    kernel TCP retransmit timeout). Does not bound total KMIP request time by itself.
   default: 300
   min: 0
-  max: 86400
+  max: 300
   services:
   - rgw
   with_legacy: true
@@ -3169,10 +3169,10 @@ options:
 - name: rgw_crypt_sse_s3_backend
   type: str
   level: advanced
-  desc: Where the SSE-S3 encryption keys are stored. The only valid choice here is
-    HashiCorp Vault ('vault').
-  fmt_desc: Where the SSE-S3 encryption keys are stored. The only valid
-    choice is HashiCorp Vault (``vault``).
+  desc: Where the SSE-S3 encryption keys are stored. Supported backends are
+    HashiCorp Vault ('vault') and KMIP ('kmip').
+  fmt_desc: Where the SSE-S3 encryption keys are stored. Supported backends
+    are HashiCorp Vault (``vault``) and KMIP (``kmip``).
   default: vault
   services:
   - rgw

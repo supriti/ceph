@@ -20,18 +20,8 @@ extern "C" {
 
 #define dout_subsys ceph_subsys_rgw
 
-// KMIP 1.4 §9.1.3.2.19 Revocation Reason enumeration.
-// TODO: move to libkmip (src/libkmip) once Ceph-side changes are stable.
-enum KmipRevocationReason {
-  KMIP_REVOKE_UNSPECIFIED              = 1,
-  KMIP_REVOKE_KEY_COMPROMISE           = 2,
-  KMIP_REVOKE_CA_COMPROMISE            = 3,
-  KMIP_REVOKE_AFFILIATION_CHANGED      = 4,
-  KMIP_REVOKE_SUPERSEDED               = 5,
-  KMIP_REVOKE_CESSATION_OF_OPERATION   = 6,
-  KMIP_REVOKE_PRIVILEGE_WITHDRAWN      = 7,
-};
-
+// AES-256 key: 32 bytes / 256 bits. DEKs and KEK-wrapped outputs must match.
+static constexpr int KMIP_DEK_SIZE = 32;
 static RGWKmipSSES3* g_kmip_sse_s3_backend = nullptr;
 static ceph::mutex g_kmip_sse_s3_lock = ceph::make_mutex("kmip_sse_s3");
 
@@ -68,102 +58,6 @@ int RGWKmipSSES3::create_bucket_key(const DoutPrefixProvider* dpp,
                                      const std::string& bucket_name,
                                      std::string& kek_id_out,
                                      optional_yield y) {
-  struct CreateAndActivateKey : public RGWKMIPTransceiver {
-    std::string kek_id;
-    std::string name;
-    const DoutPrefixProvider* dpp;
-
-    CreateAndActivateKey(CephContext* cct, const std::string& name_in, const DoutPrefixProvider* dpp_in)
-      : RGWKMIPTransceiver(cct, RGWKMIPTransceiver::CREATE),
-        name(name_in),
-        dpp(dpp_in) {}
-
-  int execute(KMIP* ctx, BIO* bio) override {
-      ERR_clear_error();
-      /* Pooled KMIP ctx is owned by the handle; reset per op (kmip_init would tear down credentials). */
-      kmip_reset(ctx);
-
-      if (!kek_id.empty()) {
-        return 1;
-      }
-
-      // --- Fixed Name Attribute Setup ---
-      Attribute name_attr;
-      memset(&name_attr, 0, sizeof(name_attr));
-      name_attr.type = KMIP_ATTR_NAME;
-
-      // libkmip Name struct initialization
-      Name* name_val = (Name*)ctx->calloc_func(ctx->state, 1, sizeof(Name));
-      text_string* ts = (text_string*)ctx->calloc_func(ctx->state, 1, sizeof(text_string));
-      ts->value = const_cast<char*>(name.c_str());
-      ts->size = name.length();
-
-      name_val->value = ts;
-      name_val->type = KMIP_NAME_UNINTERPRETED_TEXT_STRING;
-      name_attr.value = name_val;
-
-      TemplateAttribute template_attr = {0};
-      Attribute attrs[4]; 
-      memset(attrs, 0, sizeof(attrs));
-
-      attrs[0] = name_attr;
-      
-      // Attr 1: AES
-      attrs[1].type = KMIP_ATTR_CRYPTOGRAPHIC_ALGORITHM;
-      attrs[1].value = ctx->calloc_func(ctx->state, 1, sizeof(int32));
-      *(int32*)attrs[1].value = KMIP_CRYPTOALG_AES;
-
-      // Attr 2: 256 bits
-      attrs[2].type = KMIP_ATTR_CRYPTOGRAPHIC_LENGTH;
-      attrs[2].value = ctx->calloc_func(ctx->state, 1, sizeof(int32));
-      *(int32*)attrs[2].value = 256;
-
-      // Attr 3: Encrypt+Decrypt
-      attrs[3].type = KMIP_ATTR_CRYPTOGRAPHIC_USAGE_MASK;
-      attrs[3].value = ctx->calloc_func(ctx->state, 1, sizeof(int32));
-      *(int32*)attrs[3].value = KMIP_CRYPTOMASK_ENCRYPT | KMIP_CRYPTOMASK_DECRYPT;
-
-      template_attr.attributes = attrs;
-      template_attr.attribute_count = 4;
-
-      char* key_id = nullptr;
-      int key_id_size = 0;
-      int ret = kmip_bio_create_symmetric_key_with_context(ctx, bio, &template_attr, &key_id, &key_id_size);
-      
-      // Cleanup attr memory (Start from 1 because attrs[0] uses stack structs ts and name_val)
-      ctx->free_func(ctx->state, ts);
-      ctx->free_func(ctx->state, name_val);
-      for (int i = 1; i < 4; i++) {
-        if (attrs[i].value) ctx->free_func(ctx->state, attrs[i].value);
-      }
-
-      if (ret != KMIP_OK || !key_id) {
-        ldpp_dout(this->dpp, 5) << "KMIP create failed: " << ret << dendl;
-        ERR_clear_error();
-        return -EIO;
-      }
-
-      kek_id = std::string(key_id, key_id_size);
-      ldpp_dout(this->dpp, 10) << "KMIP created key id_len=" << kek_id.length()
-                               << dendl;
-
-      ret = kmip_bio_activate_with_context(ctx, bio, key_id);
-      if (ret != KMIP_OK) {
-        ldpp_dout(this->dpp, 0) << "KMIP activate failed id_len=" << kek_id.length()
-                                << ", destroying orphaned key" << dendl;
-        kmip_bio_destroy_symmetric_key_with_context(ctx, bio,
-          const_cast<char*>(kek_id.c_str()), kek_id.length());
-        ctx->free_func(ctx->state, key_id);
-        ERR_clear_error();
-        kek_id.clear();
-        return -EIO;
-      }
-      ctx->free_func(ctx->state, key_id);
-
-      return 1;
-    }
-  };
-
   if (!rgw_kmip_manager) {
     ldpp_dout(dpp, 0) << "ERROR: KMIP manager not available" << dendl;
     return -EINVAL;
@@ -171,23 +65,101 @@ int RGWKmipSSES3::create_bucket_key(const DoutPrefixProvider* dpp,
 
   /* Key name is derived from bucket name only. If a bucket is deleted and
    * recreated with the same name, the KMIP server may still hold a key with
-   * this name; create may fail or behave as policy dictates. */
+   * this name; create a unique bucket name */
   const std::string key_template = "rgw-kek-" + bucket_name;
-  CreateAndActivateKey op(dpp->get_cct(), key_template, dpp);
 
-  int ret = rgw_kmip_manager->add_request(&op);
-  if (ret < 0) {
-    ldpp_dout(dpp, 0) << "KMIP create key request failed: " << cpp_strerror(ret) << dendl;
-    return ret;
-  }
+  int ret = rgw_kmip_manager->execute_fn(dpp, y,
+      [&](KMIP* ctx, BIO* bio) -> int {
+    ERR_clear_error();
+    /* Pooled KMIP ctx is owned by the handle; reset per op (kmip_init would tear down credentials). */
+    kmip_reset(ctx);
 
-  ret = op.wait(dpp, y);
+    Attribute name_attr;
+    memset(&name_attr, 0, sizeof(name_attr));
+    name_attr.type = KMIP_ATTR_NAME;
+
+    // libkmip Name struct: heap-allocated so libkmip can reference them during encoding.
+    Name* name_val = (Name*)ctx->calloc_func(ctx->state, 1, sizeof(Name));
+    text_string* ts = (text_string*)ctx->calloc_func(ctx->state, 1, sizeof(text_string));
+    if (!name_val || !ts) {
+      if (ts)       ctx->free_func(ctx->state, ts);
+      if (name_val) ctx->free_func(ctx->state, name_val);
+      return -ENOMEM;
+    }
+    ts->value = const_cast<char*>(key_template.c_str());
+    ts->size = key_template.length();
+
+    name_val->value = ts;
+    name_val->type = KMIP_NAME_UNINTERPRETED_TEXT_STRING;
+    name_attr.value = name_val;
+
+    TemplateAttribute template_attr = {0};
+    Attribute attrs[4];
+    memset(attrs, 0, sizeof(attrs));
+
+    attrs[0] = name_attr;
+
+    attrs[1].type = KMIP_ATTR_CRYPTOGRAPHIC_ALGORITHM;
+    attrs[1].value = ctx->calloc_func(ctx->state, 1, sizeof(int32));
+    attrs[2].type = KMIP_ATTR_CRYPTOGRAPHIC_LENGTH;
+    attrs[2].value = ctx->calloc_func(ctx->state, 1, sizeof(int32));
+    attrs[3].type = KMIP_ATTR_CRYPTOGRAPHIC_USAGE_MASK;
+    attrs[3].value = ctx->calloc_func(ctx->state, 1, sizeof(int32));
+
+    if (!attrs[1].value || !attrs[2].value || !attrs[3].value) {
+      ctx->free_func(ctx->state, ts);
+      ctx->free_func(ctx->state, name_val);
+      for (int i = 1; i < 4; i++) {
+        if (attrs[i].value) ctx->free_func(ctx->state, attrs[i].value);
+      }
+      return -ENOMEM;
+    }
+    *(int32*)attrs[1].value = KMIP_CRYPTOALG_AES;
+    *(int32*)attrs[2].value = 256;
+    *(int32*)attrs[3].value = KMIP_CRYPTOMASK_ENCRYPT | KMIP_CRYPTOMASK_DECRYPT;
+
+    template_attr.attributes = attrs;
+    template_attr.attribute_count = 4;
+
+    char* key_id = nullptr;
+    int key_id_size = 0;
+    int r = kmip_bio_create_symmetric_key_with_context(ctx, bio, &template_attr, &key_id, &key_id_size);
+
+    // attrs[0].value (name_val, ts) freed separately; attrs[1-3] freed in loop.
+    ctx->free_func(ctx->state, ts);
+    ctx->free_func(ctx->state, name_val);
+    for (int i = 1; i < 4; i++) {
+      if (attrs[i].value) ctx->free_func(ctx->state, attrs[i].value);
+    }
+
+    if (r != KMIP_OK || !key_id) {
+      ldpp_dout(dpp, 5) << "KMIP create failed: " << r << dendl;
+      ERR_clear_error();
+      return -EIO;
+    }
+
+    kek_id_out = std::string(key_id, key_id_size);
+    ldpp_dout(dpp, 10) << "KMIP created key id_len=" << kek_id_out.length() << dendl;
+
+    r = kmip_bio_activate_with_context(ctx, bio, key_id);
+    if (r != KMIP_OK) {
+      ldpp_dout(dpp, 0) << "KMIP activate failed id_len=" << kek_id_out.length()
+                        << ", destroying orphaned key" << dendl;
+      kmip_bio_destroy_symmetric_key_with_context(ctx, bio,
+        const_cast<char*>(kek_id_out.c_str()), kek_id_out.length());
+      ctx->free_func(ctx->state, key_id);
+      ERR_clear_error();
+      kek_id_out.clear();
+      return -EIO;
+    }
+    ctx->free_func(ctx->state, key_id);
+    return 0;
+  });
+
   if (ret < 0) {
     ldpp_dout(dpp, 0) << "Create KEK failed" << dendl;
     return ret;
   }
-
-  kek_id_out = op.kek_id;
 
   ldpp_dout(dpp, 10) << "KMIP created and activated KEK id_len=" << kek_id_out.length()
                      << dendl;
@@ -198,49 +170,31 @@ int RGWKmipSSES3::create_bucket_key(const DoutPrefixProvider* dpp,
 int RGWKmipSSES3::destroy_bucket_key(const DoutPrefixProvider* dpp,
                                       const std::string& kek_id,
                                       optional_yield y) {
+  int ret = rgw_kmip_manager->execute_fn(dpp, y,
+      [&](KMIP* ctx, BIO* bio) -> int {
+    char* id_ptr = const_cast<char*>(kek_id.c_str());
+    int id_len = kek_id.length();
 
-  struct DestroyKey : public RGWKMIPTransceiver {
-    std::string kek_id;
-    const DoutPrefixProvider* dpp;
+    kmip_reset(ctx);
+    ERR_clear_error();
 
-    DestroyKey(CephContext* cct, const std::string& kek, const DoutPrefixProvider* dpp_in)
-      : RGWKMIPTransceiver(cct, RGWKMIPTransceiver::DESTROY),
-        kek_id(kek),
-        dpp(dpp_in) {}
-
-    int execute(KMIP* ctx, BIO* bio) override {
-      char* id_ptr = const_cast<char*>(kek_id.c_str());
-      int id_len = kek_id.length();
-
-      kmip_reset(ctx);
+    int revoke_res = kmip_bio_revoke_with_context(
+        ctx, bio, id_ptr, id_len, KMIP_REVOCATION_CESSATION_OF_OPERATION);
+    if (revoke_res != 0) {
+      ldpp_dout(dpp, 0) << "KMIP revoke KEK id_len=" << kek_id.length()
+                        << " returned " << revoke_res
+                        << " (proceeding to destroy)" << dendl;
       ERR_clear_error();
-
-      int revoke_res = kmip_bio_revoke_with_context(
-          ctx, bio, id_ptr, id_len, KMIP_REVOKE_CESSATION_OF_OPERATION);
-      if (revoke_res != 0) {
-        ldpp_dout(this->dpp, 5) << "KMIP revoke KEK id_len=" << kek_id.length()
-                                << " returned " << revoke_res
-                                << " (proceeding to destroy)" << dendl;
-        ERR_clear_error();
-      }
-      int destroy_res = kmip_bio_destroy_symmetric_key_with_context(ctx, bio, id_ptr, id_len);
-
-      if (destroy_res != 0) {
-        ldpp_dout(this->dpp, 0) << "KMIP destroy failed: " << destroy_res << dendl;
-        ERR_clear_error();
-        return -EIO;
-      }
-
-      return 1;
     }
-  };
+    int destroy_res = kmip_bio_destroy_symmetric_key_with_context(ctx, bio, id_ptr, id_len);
+    if (destroy_res != 0) {
+      ldpp_dout(dpp, 0) << "KMIP destroy failed: " << destroy_res << dendl;
+      ERR_clear_error();
+      return -EIO;
+    }
+    return 0;
+  });
 
-  DestroyKey op(dpp->get_cct(), kek_id, dpp);
-
-  int ret = rgw_kmip_manager->add_request(&op);
-  if (ret < 0) return ret;
-
-  ret = op.wait(dpp, y);
   if (ret < 0) {
     ldpp_dout(dpp, 0) << "Destroy KEK failed: " << cpp_strerror(ret) << dendl;
   } else {
@@ -257,119 +211,100 @@ int RGWKmipSSES3::generate_and_wrap_dek(const DoutPrefixProvider* dpp,
                                          bufferlist& plaintext_dek_out,
                                          bufferlist& wrapped_dek_out,
                                          optional_yield y) {
-
   // Generate random DEK
-  unsigned char dek[32];
-  if (RAND_bytes(dek, 32) != 1) {
+  unsigned char dek[KMIP_DEK_SIZE];
+  if (RAND_bytes(dek, KMIP_DEK_SIZE) != 1) {
     ldpp_dout(dpp, 0) << "Failed to generate DEK" << dendl;
     return -EIO;
   }
 
   plaintext_dek_out.clear();
 
-  // Wrap DEK with KMIP
-  struct WrapDEK : public RGWKMIPTransceiver {
-    std::string kek_id;
-    const unsigned char* dek_ptr;
-    std::string encryption_context;
-    bufferlist wrapped_dek;
-    const DoutPrefixProvider* dpp;
-
-    WrapDEK(CephContext* cct, const std::string& kek, const unsigned char* dek_ptr, const std::string& ctx, const DoutPrefixProvider* dpp_in)
-  : RGWKMIPTransceiver(cct, RGWKMIPTransceiver::ENCRYPT),
-    kek_id(kek),
-    dek_ptr(dek_ptr),
-    encryption_context(ctx),
-    dpp(dpp_in) {
-      if (!encryption_context.empty() && encryption_context.back() == '\0') {
-          encryption_context.pop_back();
-      }
-    }
-
-    int execute(KMIP* ctx, BIO* bio) override {
-      wrapped_dek.clear();
-      /* kmip_bio_encrypt_with_context resets ctx at entry */
-
-      CryptographicParameters params;
-      memset(&params, 0, sizeof(params));
-      kmip_init_cryptographic_parameters(&params);
-      params.cryptographic_algorithm = KMIP_CRYPTOALG_AES;
-      params.block_cipher_mode = KMIP_BLOCK_GCM;
-      params.padding_method = KMIP_PAD_NONE;
-      params.random_iv = KMIP_TRUE;
-      params.tag_length = 16;
-      const uint8_t* aad_ptr = reinterpret_cast<const uint8_t*>(encryption_context.c_str());
-      int aad_len = static_cast<int>(encryption_context.length());
-
-      uint8_t* ciphertext = NULL;
-      int ciphertext_size = 0;
-      uint8_t* iv = NULL;
-      int iv_size = 0;
-      uint8_t* tag = NULL;
-      int tag_size = 0;
-
-      int ret = kmip_bio_encrypt_with_context(
-          ctx, bio,
-          const_cast<char*>(kek_id.c_str()), (int)kek_id.length(),
-          const_cast<uint8_t*>(dek_ptr), 32,
-          const_cast<uint8_t*>(aad_ptr), aad_len,
-          &params,
-          &ciphertext, &ciphertext_size,
-          &iv, &iv_size,
-          &tag, &tag_size
-      );
-
-      if (ret != KMIP_OK) {
-        ldpp_dout(dpp, 0) << "KMIP encrypt failed: " << ret << dendl;
-        if (ciphertext) { memset(ciphertext, 0, ciphertext_size); ctx->free_func(ctx->state, ciphertext); }
-        if (iv) { memset(iv, 0, iv_size); ctx->free_func(ctx->state, iv); }
-        if (tag) { memset(tag, 0, tag_size); ctx->free_func(ctx->state, tag); }
-        return -EIO;
-      }
-
-      uint32_t iv_sz_n = htonl(iv_size);
-      uint32_t tag_sz_n = htonl(tag_size);
-
-      wrapped_dek.append((char*)&iv_sz_n, 4);
-      wrapped_dek.append((char*)&tag_sz_n, 4);
-      wrapped_dek.append((char*)iv, iv_size);
-      wrapped_dek.append((char*)tag, tag_size);
-      wrapped_dek.append((char*)ciphertext, ciphertext_size);
-
-      memset(ciphertext, 0, ciphertext_size);
-      memset(iv, 0, iv_size);
-      memset(tag, 0, tag_size);
-
-      if (ciphertext) ctx->free_func(ctx->state, ciphertext);
-      if (iv) ctx->free_func(ctx->state, iv);
-      if (tag) ctx->free_func(ctx->state, tag);
-
-      ldpp_dout(dpp, 10) << "KMIP encrypt succeeded, wrapped_dek="
-                         << wrapped_dek.length() << " bytes" << dendl;
-      return 1;
-    }
-
-  };
-
-  WrapDEK op(cct, kek_id, dek, encryption_context, dpp);
-
-  int ret = rgw_kmip_manager->add_request(&op);
-  if (ret < 0) {
-    explicit_bzero(dek, 32);
-    return ret;
+  /* Strip trailing NUL if callers pass null-terminated strings as std::string.
+   * AAD must be identical at wrap and unwrap time; stripping here ensures
+   * consistent behaviour if the caller is inconsistent. */
+  std::string aad = encryption_context;
+  if (!aad.empty() && aad.back() == '\0') {
+    aad.pop_back();
   }
 
-  ret = op.wait(dpp, y);
+  int ret = rgw_kmip_manager->execute_fn(dpp, y,
+      [&](KMIP* ctx, BIO* bio) -> int {
+    wrapped_dek_out.clear();
+    /* kmip_bio_encrypt_with_context resets ctx at entry */
+
+    /* Zeroize a KMIP-allocated buffer and free it back to the KMIP allocator. */
+    auto kmip_zeroize_free = [ctx](uint8_t* buf, int sz) {
+      if (buf) {
+        ::ceph::crypto::zeroize_for_security(buf, sz);
+        ctx->free_func(ctx->state, buf);
+      }
+    };
+
+    CryptographicParameters params;
+    memset(&params, 0, sizeof(params));
+    kmip_init_cryptographic_parameters(&params);
+    params.cryptographic_algorithm = KMIP_CRYPTOALG_AES;
+    params.block_cipher_mode = KMIP_BLOCK_GCM;
+    params.padding_method = KMIP_PAD_NONE;
+    params.random_iv = KMIP_TRUE;
+    params.tag_length = 16;
+    const uint8_t* aad_ptr = reinterpret_cast<const uint8_t*>(aad.c_str());
+    int aad_len = static_cast<int>(aad.length());
+
+    uint8_t* ciphertext = NULL;
+    int ciphertext_size = 0;
+    uint8_t* iv = NULL;
+    int iv_size = 0;
+    uint8_t* tag = NULL;
+    int tag_size = 0;
+
+    int r = kmip_bio_encrypt_with_context(
+        ctx, bio,
+        const_cast<char*>(kek_id.c_str()), (int)kek_id.length(),
+        const_cast<uint8_t*>(dek), KMIP_DEK_SIZE,
+        const_cast<uint8_t*>(aad_ptr), aad_len,
+        &params,
+        &ciphertext, &ciphertext_size,
+        &iv, &iv_size,
+        &tag, &tag_size
+    );
+
+    if (r != KMIP_OK) {
+      ldpp_dout(dpp, 0) << "KMIP encrypt failed: " << r << dendl;
+      kmip_zeroize_free(ciphertext, ciphertext_size);
+      kmip_zeroize_free(iv, iv_size);
+      kmip_zeroize_free(tag, tag_size);
+      return -EIO;
+    }
+
+    uint32_t iv_sz_n = htonl(iv_size);
+    uint32_t tag_sz_n = htonl(tag_size);
+
+    wrapped_dek_out.append((char*)&iv_sz_n, 4);
+    wrapped_dek_out.append((char*)&tag_sz_n, 4);
+    wrapped_dek_out.append((char*)iv, iv_size);
+    wrapped_dek_out.append((char*)tag, tag_size);
+    wrapped_dek_out.append((char*)ciphertext, ciphertext_size);
+
+    kmip_zeroize_free(ciphertext, ciphertext_size);
+    kmip_zeroize_free(iv, iv_size);
+    kmip_zeroize_free(tag, tag_size);
+
+    ldpp_dout(dpp, 10) << "KMIP encrypt succeeded, wrapped_dek="
+                       << wrapped_dek_out.length() << " bytes" << dendl;
+    return 0;
+  });
+
   if (ret < 0) {
-    explicit_bzero(dek, 32);
+    explicit_bzero(dek, KMIP_DEK_SIZE);
     ldpp_dout(dpp, 0) << "KMIP wrap DEK failed" << dendl;
     return ret;
   }
 
-  plaintext_dek_out.append((char*)dek, 32);
-  explicit_bzero(dek, 32);
+  plaintext_dek_out.append((char*)dek, KMIP_DEK_SIZE);
+  explicit_bzero(dek, KMIP_DEK_SIZE);
 
-  wrapped_dek_out = std::move(op.wrapped_dek);
   ldpp_dout(dpp, 10) << "KMIP wrapped DEK, size=" << wrapped_dek_out.length() << dendl;
   return 0;
 }
@@ -385,99 +320,70 @@ int RGWKmipSSES3::unwrap_dek(const DoutPrefixProvider* dpp,
     return -EINVAL;
   }
 
-  struct UnwrapDEK : public RGWKMIPTransceiver {
-    std::string kek_id;
-    bufferlist wrapped_dek;
-    std::string encryption_context;
-    bufferlist plaintext_dek;
-    const DoutPrefixProvider* dpp;
+  int ret = rgw_kmip_manager->execute_fn(dpp, y,
+      [&](KMIP* ctx, BIO* bio) -> int {
+    /* kmip_bio_decrypt_with_context resets ctx at entry */
+    plaintext_dek_out.clear();
 
-    UnwrapDEK(CephContext *cct, const std::string& kek, const bufferlist& wrapped, const std::string& context, const DoutPrefixProvider* dpp_in)
-    : RGWKMIPTransceiver(cct, RGWKMIPTransceiver::DECRYPT),
-      kek_id(kek),
-      wrapped_dek(wrapped),
-      encryption_context(context),
-      dpp(dpp_in) {}
-
-    int execute(KMIP* ctx, BIO* bio) override {
-      /* kmip_bio_decrypt_with_context resets ctx at entry */
-      plaintext_dek.clear();
-
-      if (wrapped_dek.length() < 8) {
-        ldpp_dout(dpp, 0) << "KMIP ERROR: wrapped_dek too small for header"
-                          << dendl;
-        return -EINVAL;
-      }
-
-      std::vector<char> buffer(wrapped_dek.length());
-      wrapped_dek.begin().copy(wrapped_dek.length(), buffer.data());
-      rgw_kmip_wrapped_dek_parsed layout{};
-      if (rgw_kmip_parse_wrapped_dek(buffer.data(), buffer.size(), &layout)
-          != 0) {
-        ldpp_dout(dpp, 0) << "KMIP ERROR: invalid wrapped DEK layout len="
-                          << buffer.size() << dendl;
-        return -EINVAL;
-      }
-
-      const uint8_t* iv_ptr = reinterpret_cast<const uint8_t*>(layout.iv_ptr);
-      const uint8_t* tag_ptr = reinterpret_cast<const uint8_t*>(layout.tag_ptr);
-      const uint8_t* ct_ptr =
-          reinterpret_cast<const uint8_t*>(layout.ciphertext_ptr);
-      const int ct_size = layout.ciphertext_size;
-
-      CryptographicParameters params;
-      memset(&params, 0, sizeof(params));
-      kmip_init_cryptographic_parameters(&params);
-      params.cryptographic_algorithm = KMIP_CRYPTOALG_AES;
-      params.block_cipher_mode = KMIP_BLOCK_GCM;
-      params.padding_method = KMIP_PAD_NONE;
-      params.tag_length = 16;
-      const uint8_t* aad_ptr = reinterpret_cast<const uint8_t*>(encryption_context.c_str());
-      int aad_len = static_cast<int>(encryption_context.length());
-
-      uint8_t* plaintext = nullptr;
-      int32_t plaintext_size = 0;
-
-      int ret = kmip_bio_decrypt_with_context(
-        ctx, bio,
-        const_cast<char*>(kek_id.c_str()), (int)kek_id.length(),
-        const_cast<uint8_t*>(ct_ptr), ct_size,
-        const_cast<uint8_t*>(aad_ptr), aad_len,
-        const_cast<uint8_t*>(iv_ptr), static_cast<int>(layout.iv_size),
-        const_cast<uint8_t*>(tag_ptr), static_cast<int>(layout.tag_size),
-        &params,
-        &plaintext, &plaintext_size
-      );
-
-      if (ret != KMIP_OK || plaintext_size != 32) {
-        ldpp_dout(dpp, 0) << "KMIP decrypt failed: ret=" << ret
-                          << " plaintext_size=" << plaintext_size << dendl;
-        if (plaintext) {
-          ::ceph::crypto::zeroize_for_security(plaintext, plaintext_size);
-          ctx->free_func(ctx->state, plaintext);
-        }
-        return -EIO;
-      }
-
-      plaintext_dek.append(reinterpret_cast<char*>(plaintext), 32);
-      ::ceph::crypto::zeroize_for_security(plaintext, plaintext_size);
-      ctx->free_func(ctx->state, plaintext);
-      return 1;
+    std::vector<char> buffer(wrapped_dek.length());
+    wrapped_dek.begin().copy(wrapped_dek.length(), buffer.data());
+    rgw_kmip_wrapped_dek_parsed layout{};
+    if (rgw_kmip_parse_wrapped_dek(buffer.data(), buffer.size(), &layout) != 0) {
+      ldpp_dout(dpp, 0) << "KMIP ERROR: invalid wrapped DEK layout len="
+                        << buffer.size() << dendl;
+      return -EINVAL;
     }
-  };
 
-  UnwrapDEK op(cct, kek_id, wrapped_dek, encryption_context, dpp);
+    const uint8_t* iv_ptr = reinterpret_cast<const uint8_t*>(layout.iv_ptr);
+    const uint8_t* tag_ptr = reinterpret_cast<const uint8_t*>(layout.tag_ptr);
+    const uint8_t* ct_ptr = reinterpret_cast<const uint8_t*>(layout.ciphertext_ptr);
+    const int ct_size = static_cast<int>(layout.ciphertext_size);
 
-  int ret = rgw_kmip_manager->add_request(&op);
-  if (ret < 0) return ret;
+    CryptographicParameters params;
+    memset(&params, 0, sizeof(params));
+    kmip_init_cryptographic_parameters(&params);
+    params.cryptographic_algorithm = KMIP_CRYPTOALG_AES;
+    params.block_cipher_mode = KMIP_BLOCK_GCM;
+    params.padding_method = KMIP_PAD_NONE;
+    params.tag_length = 16;
+    const uint8_t* aad_ptr = reinterpret_cast<const uint8_t*>(encryption_context.c_str());
+    int aad_len = static_cast<int>(encryption_context.length());
 
-  ret = op.wait(dpp, y);
+    uint8_t* plaintext = nullptr;
+    int32_t plaintext_size = 0;
+
+    int r = kmip_bio_decrypt_with_context(
+      ctx, bio,
+      const_cast<char*>(kek_id.c_str()), (int)kek_id.length(),
+      const_cast<uint8_t*>(ct_ptr), ct_size,
+      const_cast<uint8_t*>(aad_ptr), aad_len,
+      const_cast<uint8_t*>(iv_ptr), static_cast<int>(layout.iv_size),
+      const_cast<uint8_t*>(tag_ptr), static_cast<int>(layout.tag_size),
+      &params,
+      &plaintext, &plaintext_size
+    );
+
+    if (r != KMIP_OK || plaintext_size != KMIP_DEK_SIZE) {
+      ldpp_dout(dpp, 0) << "KMIP decrypt failed: ret=" << r
+                        << " plaintext_size=" << plaintext_size << dendl;
+      if (plaintext) {
+        ::ceph::crypto::zeroize_for_security(plaintext, plaintext_size);
+        ctx->free_func(ctx->state, plaintext);
+      }
+      return -EIO;
+    }
+
+    plaintext_dek_out.append(reinterpret_cast<char*>(plaintext), KMIP_DEK_SIZE);
+    ::ceph::crypto::zeroize_for_security(plaintext, plaintext_size);
+    ctx->free_func(ctx->state, plaintext);
+    return 0;
+  });
+
   if (ret < 0) {
     ldpp_dout(dpp, 0) << "Unwrap DEK failed: " << cpp_strerror(ret) << dendl;
     return ret;
   }
 
-  plaintext_dek_out = std::move(op.plaintext_dek);
   ldpp_dout(dpp, 10) << "Successfully unwrapped DEK ("
                       << plaintext_dek_out.length() << " bytes)" << dendl;
   return 0;
