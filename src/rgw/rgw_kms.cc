@@ -1102,7 +1102,6 @@ static int reconstitute_actual_key_from_kmip(const DoutPrefixProvider *dpp,
                                               std::string& actual_key)
 {
   CephContext* cct = dpp->get_cct();
-  //TODO: DEEPIKA use existing manager
   RGWKmipSseS3Backend* kmip_backend = get_kmip_sse_s3_backend(cct);
 
   if (!kmip_backend) {
@@ -1134,16 +1133,8 @@ static int get_actual_key_from_kmip(const DoutPrefixProvider *dpp,
                                     optional_yield y,
                                     std::string& actual_key)
 {
-  std::string secret_engine = RGW_SSE_KMS_KMIP_SE_KV;
-
-  if (RGW_SSE_KMS_KMIP_SE_KV == secret_engine){
-    KmipSecretEngine engine(dpp->get_cct());
-    return engine.get_key(dpp, key_id, y, actual_key);
-  }
-  else{
-    ldpp_dout(dpp, 0) << "Missing or invalid secret engine" << dendl;
-    return -EINVAL;
-  }
+  KmipSecretEngine engine(dpp->get_cct());
+  return engine.get_key(dpp, key_id, y, actual_key);
 }
 class KMSContext : public SSEContext {
   CephContext *cct;
@@ -1324,7 +1315,7 @@ int create_sse_s3_bucket_key(const DoutPrefixProvider *dpp,
 
   ldpp_dout(dpp, 10) << "create_sse_s3_bucket_key using backend: " << kms_backend << dendl;
 
-  if (kms_backend == "kmip") {
+  if (kms_backend == RGW_SSE_KMS_BACKEND_KMIP) {
     RGWKmipSseS3Backend* kmip_backend = get_kmip_sse_s3_backend(cct);
     if (!kmip_backend) {
       ldpp_dout(dpp, 0) << "ERROR: KMIP SSE-S3 backend unavailable" << dendl;
@@ -1345,7 +1336,7 @@ int create_sse_s3_bucket_key(const DoutPrefixProvider *dpp,
     return 0;
   }
 
-  if (kms_backend == "vault") {
+  if (kms_backend == RGW_SSE_KMS_BACKEND_VAULT) {
     std::string secret_engine_str = kctx.secret_engine();
     EngineParmMap secret_engine_parms;
     auto secret_engine { config_to_engine_and_parms(
@@ -1375,7 +1366,7 @@ int remove_sse_s3_bucket_key(const DoutPrefixProvider *dpp,
   SseS3Context kctx { cct };
   const std::string kms_backend { kctx.backend() };
   
-  if (kms_backend == "kmip") {
+  if (kms_backend == RGW_SSE_KMS_BACKEND_KMIP) {
     RGWKmipSseS3Backend* kmip_backend = get_kmip_sse_s3_backend(cct);
     if (!kmip_backend) {
       ldpp_dout(dpp, 0) << "ERROR: KMIP SSE-S3 backend unavailable" << dendl;
@@ -1385,17 +1376,16 @@ int remove_sse_s3_bucket_key(const DoutPrefixProvider *dpp,
     return kmip_backend->destroy_bucket_key(dpp, bucket_key, y);
   }
 
-  if (kms_backend == "vault") {
+  if (kms_backend == RGW_SSE_KMS_BACKEND_VAULT) {
     std::string secret_engine_str = kctx.secret_engine();
     EngineParmMap secret_engine_parms;
     auto secret_engine { config_to_engine_and_parms(
       cct, "rgw_crypt_sse_s3_vault_secret_engine",
       secret_engine_str, secret_engine_parms) };
-    if (RGW_SSE_KMS_VAULT_SE_TRANSIT == secret_engine){
+    if (RGW_SSE_KMS_VAULT_SE_TRANSIT == secret_engine) {
       TransitSecretEngine engine(cct, kctx, std::move(secret_engine_parms));
       return engine.delete_bucket_key(dpp, bucket_key, y);
-    }
-    else {
+    } else {
       ldpp_dout(dpp, 0) << "Missing or invalid secret engine" << dendl;
       return -EINVAL;
     }

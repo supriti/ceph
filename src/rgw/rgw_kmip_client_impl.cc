@@ -9,10 +9,8 @@
 #include <mutex>
 #include <string.h>
 
-#if !defined(_WIN32)
 #include <sys/socket.h>
 #include <sys/time.h>
-#endif
 
 #include "include/compat.h"
 #include "common/errno.h"
@@ -33,7 +31,6 @@ extern "C" {
 
 static enum kmip_version protocol_version = KMIP_1_4;
 
-#if !defined(_WIN32)
 static void kmip_bio_set_socket_io_timeout(BIO *bio, int seconds)
 {
   if (!bio || seconds <= 0) {
@@ -48,7 +45,6 @@ static void kmip_bio_set_socket_io_timeout(BIO *bio, int seconds)
   (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
   (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 }
-#endif
 
 struct RGWKmipHandle {
   int uses;
@@ -256,20 +252,18 @@ RGWKmipHandleBuilder::build() const
     goto Done;
   }
 
-#if !defined(_WIN32)
   {
     int64_t sec = cct->_conf->rgw_crypt_kmip_socket_io_timeout_sec;
     if (sec < 0) {
       sec = 0;
-    } else if (sec > 86400) {
-      sec = 86400;
+    } else if (sec > 300) {
+      sec = 300;
     }
     kmip_bio_set_socket_io_timeout(r->bio, static_cast<int>(sec));
   }
-#endif
+
 
   // setup kmip
-
   kmip_init(r->kmip_ctx, NULL, 0, protocol_version);
 	r->need_to_free_kmip = 1;
 	r->buffer_blocks = 1;
@@ -344,8 +338,8 @@ RGWKmipHandles::get_kmip_handle()
   {
     std::lock_guard lock{cleaner_lock};
     if (!saved_kmip.empty()) {
-      kmip = *saved_kmip.begin();
-      saved_kmip.erase(saved_kmip.begin());
+      kmip = saved_kmip.back();   // LIFO: reuse most-recently-used connection
+      saved_kmip.pop_back();
     }
   }
   if (!kmip && hostaddr) {
@@ -383,7 +377,7 @@ RGWKmipHandles::release_kmip_handle(RGWKmipHandle* kmip)
   } else {
     std::lock_guard lock{cleaner_lock};
     kmip->lastuse = mono_clock::now();
-    saved_kmip.insert(saved_kmip.begin(), 1, kmip);
+    saved_kmip.push_back(kmip);   // LIFO: get_kmip_handle() pops from back
   }
 }
 
@@ -401,14 +395,14 @@ RGWKmipHandles::entry()
       cleaner_cond.wait_for(lock, std::chrono::seconds(MAXIDLE));
     }
     mono_time now = mono_clock::now();
+    /* Oldest entries are at the front (push_back adds to back, so front is LRU).
+     * Evict from the front until we find a connection used recently enough. */
     while (!saved_kmip.empty()) {
-      auto cend = saved_kmip.end();
-      --cend;
-      kmip = *cend;
+      kmip = saved_kmip.front();
       if (!cleaner_shutdown && now - kmip->lastuse
 	  < std::chrono::seconds(MAXIDLE))
 	break;
-      saved_kmip.erase(cend);
+      saved_kmip.erase(saved_kmip.begin());
       release_kmip_handle_now(kmip);
     }
   }
@@ -525,7 +519,15 @@ RGWKmipHandles::do_one_entry(RGWKMIPTransceiver &element)
     element.ret = (custom > 0) ? 0 : custom;
     element.done = true;
     element.cond.notify_all();
-    release_kmip_handle_now(h);
+    /* kmip_bio_*_with_context functions allocate and free their own internal
+     * buffer, leaving ctx->buffer == NULL.  Restore the handle's encoding
+     * buffer before returning it to the pool so the next operation can reuse
+     * this TLS connection without a fresh handshake. */
+    kmip_set_buffer(h->kmip_ctx, h->encoding, h->buffer_total_size);
+    if (custom > 0)
+      release_kmip_handle(h);   // success: pool the connection for reuse
+    else
+      release_kmip_handle_now(h); // error: drop it (may be in bad state)
     return element.ret;
   }
 
