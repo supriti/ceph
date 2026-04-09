@@ -16,6 +16,12 @@
 #include "common/ceph_context.h"
 #include "rgw_common.h"
 
+#include <ctime>
+
+extern "C" {
+#include "kmip.h"
+}
+
 using testing::_;
 using testing::Invoke;
 using testing::Return;
@@ -448,4 +454,72 @@ TEST(RgwKmipSseS3Backend, DifferentContextProducesDifferentWrapped)
   /* Different context must produce different wrapped blobs */
   EXPECT_FALSE(w1.contents_equal(w2));
   cct->put();
+}
+
+/*
+ * Inherited libkmip forks may diverge from ceph/libkmip and drop KMIP_OP_LOCATE handling
+ * in kmip_encode_request_batch_item, which breaks RGW SSE-KMS+KMIP (key lookup by name).
+ * This test locks in minimal parity: a Locate request message must encode successfully.
+ */
+TEST(LibkmipKmsLocate, EncodeLocateRequestMessage)
+{
+  KMIP ctx{};
+  kmip_init(&ctx, nullptr, 0, KMIP_1_4);
+
+  constexpr size_t k_buf = 4096;
+  std::vector<uint8_t> encbuf(k_buf);
+  kmip_set_buffer(&ctx, encbuf.data(), encbuf.size());
+
+  ProtocolVersion pv[1];
+  RequestHeader rh[1];
+  RequestMessage rm[1];
+  RequestBatchItem rbi[1];
+  union {
+    LocateRequestPayload locate_req[1];
+  } u{};
+  Attribute a[1];
+  TextString nvalue[1];
+  Name nattr[1];
+
+  memset(pv, 0, sizeof(pv));
+  memset(rh, 0, sizeof(rh));
+  memset(rm, 0, sizeof(rm));
+  memset(rbi, 0, sizeof(rbi));
+  memset(&u, 0, sizeof(u));
+  memset(a, 0, sizeof(a));
+  memset(nvalue, 0, sizeof(nvalue));
+  memset(nattr, 0, sizeof(nattr));
+
+  kmip_init_protocol_version(pv, ctx.version);
+  kmip_init_request_header(rh);
+  rh->protocol_version = pv;
+  rh->maximum_response_size = ctx.max_message_size;
+  rh->time_stamp = time(nullptr);
+  rh->batch_count = 1;
+
+  kmip_init_request_batch_item(rbi);
+  rbi->request_payload = &u;
+
+  const char keyname[] = "testkey-1";
+  kmip_init_attribute(&a[0]);
+  nvalue->value = const_cast<char*>(keyname);
+  nvalue->size = strlen(keyname);
+  nattr->value = nvalue;
+  nattr->type = KMIP_NAME_UNINTERPRETED_TEXT_STRING;
+  a[0].type = KMIP_ATTR_NAME;
+  a[0].value = nattr;
+
+  u.locate_req->attributes = a;
+  u.locate_req->attribute_count = 1;
+  rbi->operation = KMIP_OP_LOCATE;
+
+  rm->request_header = rh;
+  rm->batch_items = rbi;
+  rm->batch_count = 1;
+
+  const int rc = kmip_encode_request_message(&ctx, rm);
+  EXPECT_EQ(rc, KMIP_OK);
+  EXPECT_GT(ctx.index - ctx.buffer, 0);
+
+  kmip_destroy(&ctx);
 }
