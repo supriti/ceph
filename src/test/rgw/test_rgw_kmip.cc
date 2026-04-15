@@ -523,3 +523,73 @@ TEST(LibkmipKmsLocate, EncodeLocateRequestMessage)
 
   kmip_destroy(&ctx);
 }
+
+/*
+ * Verify KMIP_OP_REVOKE encodes successfully. Without this, SSE-S3 bucket
+ * key cleanup (revoke + destroy) fails with "Invalid Operation enumeration
+ * value", leaving orphaned keys on the KMIP server.
+ */
+TEST(LibkmipSseS3Revoke, EncodeRevokeRequestMessage)
+{
+  KMIP ctx{};
+  kmip_init(&ctx, nullptr, 0, KMIP_1_4);
+
+  constexpr size_t k_buf = 4096;
+  std::vector<uint8_t> encbuf(k_buf);
+  kmip_set_buffer(&ctx, encbuf.data(), encbuf.size());
+
+  ProtocolVersion pv{};
+  RequestHeader rh{};
+  RequestMessage rm{};
+  RequestBatchItem rbi{};
+
+  kmip_init_protocol_version(&pv, ctx.version);
+  kmip_init_request_header(&rh);
+  rh.protocol_version = &pv;
+  rh.maximum_response_size = ctx.max_message_size;
+  rh.time_stamp = time(nullptr);
+  rh.batch_count = 1;
+
+  const char key_id[] = "test-kek-uuid-1234";
+  TextString uid{};
+  uid.value = const_cast<char*>(key_id);
+  uid.size = strlen(key_id);
+
+  RevocationReason reason{};
+  reason.revocation_reason_code = KMIP_REVOCATION_CESSATION_OF_OPERATION;
+
+  RevokeRequestPayload rrp{};
+  rrp.unique_identifier = &uid;
+  rrp.revocation_reason = &reason;
+
+  kmip_init_request_batch_item(&rbi);
+  rbi.operation = KMIP_OP_REVOKE;
+  rbi.request_payload = &rrp;
+
+  rm.request_header = &rh;
+  rm.batch_items = &rbi;
+  rm.batch_count = 1;
+
+  const int rc = kmip_encode_request_message(&ctx, &rm);
+  EXPECT_EQ(rc, KMIP_OK);
+  EXPECT_GT(ctx.index - ctx.buffer, 0);
+
+  /* Also verify the operation enum is accepted by the validator. */
+  EXPECT_EQ(kmip_check_enum_value(ctx.version, KMIP_TAG_OPERATION, KMIP_OP_REVOKE), KMIP_OK);
+
+  kmip_destroy(&ctx);
+}
+
+/* Verify the enum validator accepts all operations used by RGW KMIP. */
+TEST(LibkmipEnumValidation, AllRgwOperationsAccepted)
+{
+  const enum kmip_version ver = KMIP_1_4;
+  EXPECT_EQ(kmip_check_enum_value(ver, KMIP_TAG_OPERATION, KMIP_OP_CREATE), KMIP_OK);
+  EXPECT_EQ(kmip_check_enum_value(ver, KMIP_TAG_OPERATION, KMIP_OP_GET), KMIP_OK);
+  EXPECT_EQ(kmip_check_enum_value(ver, KMIP_TAG_OPERATION, KMIP_OP_LOCATE), KMIP_OK);
+  EXPECT_EQ(kmip_check_enum_value(ver, KMIP_TAG_OPERATION, KMIP_OP_DESTROY), KMIP_OK);
+  EXPECT_EQ(kmip_check_enum_value(ver, KMIP_TAG_OPERATION, KMIP_OP_ACTIVATE), KMIP_OK);
+  EXPECT_EQ(kmip_check_enum_value(ver, KMIP_TAG_OPERATION, KMIP_OP_REVOKE), KMIP_OK);
+  EXPECT_EQ(kmip_check_enum_value(ver, KMIP_TAG_OPERATION, KMIP_OP_ENCRYPT), KMIP_OK);
+  EXPECT_EQ(kmip_check_enum_value(ver, KMIP_TAG_OPERATION, KMIP_OP_DECRYPT), KMIP_OK);
+}
