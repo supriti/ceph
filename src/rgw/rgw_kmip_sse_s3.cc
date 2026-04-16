@@ -55,7 +55,7 @@ int RGWKmipSSES3::initialize() {
 }
 
 int RGWKmipSSES3::create_bucket_key(const DoutPrefixProvider* dpp,
-                                     const std::string& bucket_name,
+                                     const std::string& bucket_id,
                                      std::string& kek_id_out,
                                      optional_yield y) {
   if (!rgw_kmip_manager) {
@@ -63,10 +63,7 @@ int RGWKmipSSES3::create_bucket_key(const DoutPrefixProvider* dpp,
     return -EINVAL;
   }
 
-  /* Key name is derived from bucket name only. If a bucket is deleted and
-   * recreated with the same name, the KMIP server may still hold a key with
-   * this name; create a unique bucket name */
-  const std::string key_template = "rgw-kek-" + bucket_name;
+  const std::string key_template = "rgw-kek-" + bucket_id;
 
   int ret = rgw_kmip_manager->execute_fn(dpp, y,
       [&](KMIP* ctx, BIO* bio) -> int {
@@ -170,6 +167,11 @@ int RGWKmipSSES3::create_bucket_key(const DoutPrefixProvider* dpp,
 int RGWKmipSSES3::destroy_bucket_key(const DoutPrefixProvider* dpp,
                                       const std::string& kek_id,
                                       optional_yield y) {
+  if (!rgw_kmip_manager) {
+    ldpp_dout(dpp, 0) << "ERROR: KMIP manager not available for destroy" << dendl;
+    return -EINVAL;
+  }
+
   int ret = rgw_kmip_manager->execute_fn(dpp, y,
       [&](KMIP* ctx, BIO* bio) -> int {
     char* id_ptr = const_cast<char*>(kek_id.c_str());
@@ -211,6 +213,11 @@ int RGWKmipSSES3::generate_and_wrap_dek(const DoutPrefixProvider* dpp,
                                          bufferlist& plaintext_dek_out,
                                          bufferlist& wrapped_dek_out,
                                          optional_yield y) {
+  if (!rgw_kmip_manager) {
+    ldpp_dout(dpp, 0) << "ERROR: KMIP manager not available for wrap" << dendl;
+    return -EINVAL;
+  }
+
   // Generate random DEK
   unsigned char dek[KMIP_DEK_SIZE];
   if (RAND_bytes(dek, KMIP_DEK_SIZE) != 1) {
@@ -220,7 +227,7 @@ int RGWKmipSSES3::generate_and_wrap_dek(const DoutPrefixProvider* dpp,
 
   plaintext_dek_out.clear();
 
-  /* Strip trailing NUL if callers pass null-terminated strings as std::string.
+  /* Strip trailing NULL if callers pass null-terminated strings as std::string.
    * AAD must be identical at wrap and unwrap time; stripping here ensures
    * consistent behaviour if the caller is inconsistent. */
   std::string aad = encryption_context;
@@ -315,6 +322,11 @@ int RGWKmipSSES3::unwrap_dek(const DoutPrefixProvider* dpp,
                               const std::string& encryption_context,
                               bufferlist& plaintext_dek_out,
                               optional_yield y) {
+  if (!rgw_kmip_manager) {
+    ldpp_dout(dpp, 0) << "ERROR: KMIP manager not available for unwrap" << dendl;
+    return -EINVAL;
+  }
+
   if (wrapped_dek.length() < 8) {
     ldpp_dout(dpp, 0) << "KMIP ERROR: Metadata size mismatch" << dendl;
     return -EINVAL;
@@ -346,8 +358,14 @@ int RGWKmipSSES3::unwrap_dek(const DoutPrefixProvider* dpp,
     params.block_cipher_mode = KMIP_BLOCK_GCM;
     params.padding_method = KMIP_PAD_NONE;
     params.tag_length = 16;
-    const uint8_t* aad_ptr = reinterpret_cast<const uint8_t*>(encryption_context.c_str());
-    int aad_len = static_cast<int>(encryption_context.length());
+    /* Strip trailing NUL — must match generate_and_wrap_dek's AAD exactly,
+     * otherwise AES-GCM authentication will fail on decrypt. */
+    std::string aad = encryption_context;
+    if (!aad.empty() && aad.back() == '\0') {
+      aad.pop_back();
+    }
+    const uint8_t* aad_ptr = reinterpret_cast<const uint8_t*>(aad.c_str());
+    int aad_len = static_cast<int>(aad.length());
 
     uint8_t* plaintext = nullptr;
     int32_t plaintext_size = 0;
