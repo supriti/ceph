@@ -1306,7 +1306,7 @@ int make_actual_key_from_sse_s3(const DoutPrefixProvider *dpp,
 int create_sse_s3_bucket_key(const DoutPrefixProvider *dpp,
                              std::string& bucket_key,
                              optional_yield y,
-                             std::string_view sse_s3_bucket_name)
+                             std::string_view sse_s3_bucket_id)
 {
   CephContext* cct = dpp->get_cct();
   SseS3Context kctx { cct };
@@ -1321,12 +1321,12 @@ int create_sse_s3_bucket_key(const DoutPrefixProvider *dpp,
       ldpp_dout(dpp, 0) << "ERROR: KMIP SSE-S3 backend unavailable" << dendl;
       return -EIO;
     }
-    if (sse_s3_bucket_name.empty()) {
+    if (sse_s3_bucket_id.empty()) {
       ldpp_dout(dpp, 0) << "ERROR: KMIP SSE-S3 key create requires S3 bucket name" << dendl;
       return -EINVAL;
     }
     /* Do not pass the same string as both KMIP name input and kek_id output (aliasing). */
-    const std::string kmip_name_base(sse_s3_bucket_name);
+    const std::string kmip_name_base(sse_s3_bucket_id);
     std::string kek_id_from_kmip;
     int r = kmip_backend->create_bucket_key(dpp, kmip_name_base, kek_id_from_kmip, y);
     if (r < 0) {

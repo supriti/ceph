@@ -1019,8 +1019,8 @@ static int get_sse_s3_bucket_key(req_state *s, optional_yield y,
     }
   }
 
-  // 3. Create the key on the KMIP/Vault backend (pass bucket name for KMIP key naming)
-  res = create_sse_s3_bucket_key(s, key_id, y, s->bucket->get_name());
+  // 3. Create the key on the KMIP/Vault backend (pass bucket id for KMIP key naming)
+  res = create_sse_s3_bucket_key(s, key_id, y, s->bucket->get_bucket_id());
   if (res != 0) {
     ldpp_dout(s, 0) << "ERROR: create_sse_s3_bucket_key failed, res=" << res << dendl;
     return res;
@@ -1353,7 +1353,7 @@ int rgw_s3_prepare_decrypt(req_state* s, optional_yield y,
   int res = 0;
   std::string stored_mode = get_str_attribute(attrs, RGW_ATTR_CRYPT_MODE);
   ldpp_dout(s, 15) << "Encryption mode: " << stored_mode << dendl;
-  
+
   const char *req_sse = s->info.env->get("HTTP_X_AMZ_SERVER_SIDE_ENCRYPTION", NULL);
   if (nullptr != req_sse && (s->op == OP_GET || s->op == OP_HEAD)) {
     return -ERR_INVALID_REQUEST;
