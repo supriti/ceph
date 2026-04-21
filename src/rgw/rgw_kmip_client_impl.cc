@@ -3,6 +3,9 @@
 
 #include <boost/intrusive/list.hpp>
 #include <atomic>
+#include <cinttypes>
+#include <cstdio>
+#include <memory>
 #include <mutex>
 #include <string.h>
 
@@ -77,6 +80,16 @@ struct RGWKmipWorker: public Thread {
     m.cond.notify_all();
   }
 };
+
+struct RGWKmipWorkerPool {
+  std::vector<std::unique_ptr<RGWKmipWorker>> workers;
+};
+
+RGWKMIPManagerImpl::RGWKMIPManagerImpl(CephContext *cct)
+  : RGWKMIPManager(cct),
+    worker_pool(std::make_unique<RGWKmipWorkerPool>()) {}
+
+RGWKMIPManagerImpl::~RGWKMIPManagerImpl() = default;
 
 /*
  * Tear down KMIP + TLS in dependency order:
@@ -436,40 +449,57 @@ RGWKmipHandles::flush_kmip_handles()
 int
 RGWKMIPManagerImpl::start()
 {
-  if (worker) {
+  auto& workers = worker_pool->workers;
+  if (!workers.empty()) {
     lderr(cct) << "kmip worker already started" << dendl;
     return -1;
   }
-  worker = new RGWKmipWorker(*this);
-  worker->create("kmip worker");
+  int64_t n = cct->_conf->rgw_crypt_kmip_worker_threads;
+  if (n < 1) {
+    n = 1;
+  } else if (n > 32) {
+    n = 32;
+  }
+  workers.reserve(static_cast<size_t>(n));
+  for (int64_t i = 0; i < n; ++i) {
+    char name[16];
+    snprintf(name, sizeof(name), "rgwkmip%" PRId64, i);
+    auto w = std::make_unique<RGWKmipWorker>(*this);
+    w->create(name);
+    workers.push_back(std::move(w));
+  }
   return 0;
 }
 
 void
 RGWKMIPManagerImpl::stop()
 {
-  going_down = true;
-  if (worker) {
-    worker->signal();
-    worker->join();
-    delete worker;
-    worker = 0;
+  {
+    std::lock_guard l{lock};
+    going_down = true;
+    cond.notify_all();
   }
+  auto& workers = worker_pool->workers;
+  for (auto& w : workers) {
+    w->join();
+  }
+  workers.clear();
 }
 
 int
 RGWKMIPManagerImpl::add_request(RGWKMIPTransceiver *req)
 {
   std::unique_lock l{lock};
-  if (going_down)
+  if (going_down) {
+    ldout(cct, 10) << "add_request(): going_down=true, rejecting" << dendl;
     return -ECANCELED;
+  }
   // requests is a boost::intrusive::list, which manages pointers and does not copy the instance
   // coverity[leaked_storage:SUPPRESS]
   // coverity[uninit_use_in_call:SUPPRESS]
   requests.push_back(*new Request{*req});
+  cond.notify_one();
   l.unlock();
-  if (worker)
-    worker->signal();
   return 0;
 }
 
@@ -755,20 +785,25 @@ RGWKmipWorker::entry()
       continue;
     }
     auto iter = m.requests.begin();
-    auto element = *iter;
+    RGWKMIPManagerImpl::Request *node = &*iter;
     m.requests.erase(iter);
+    ldout(m.cct, 10) << "KMIP WORKER: remaining queue depth "
+                     << m.requests.size() << dendl;
     entry_lock.unlock();
-    (void) handles.do_one_entry(element.details);
-    entry_lock.lock();
+    (void) handles.do_one_entry(node->details);
+    delete node;
   }
   for (;;) {
     if (m.requests.empty()) break;
     auto iter = m.requests.begin();
-    auto element = std::move(*iter);
+    RGWKMIPManagerImpl::Request *node = &*iter;
+    ldout(m.cct, 10) << "KMIP WORKER: Dispatching op="
+                     << (int)node->details.operation << dendl;
     m.requests.erase(iter);
-    element.details.ret = -666;
-    element.details.done = true;
-    element.details.cond.notify_all();
+    node->details.ret = -ECANCELED;
+    node->details.done = true;
+    node->details.cond.notify_all();
+    delete node;
   }
   handles.stop();
   ldout(m.cct, 10) << __func__ << " finish" << dendl;
