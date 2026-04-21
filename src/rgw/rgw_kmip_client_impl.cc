@@ -367,7 +367,7 @@ RGWKmipHandles::release_kmip_handle(RGWKmipHandle* kmip)
   } else {
     std::lock_guard lock{cleaner_lock};
     kmip->lastuse = mono_clock::now();
-    saved_kmip.insert(saved_kmip.begin(), 1, kmip);
+    saved_kmip.push_back(kmip);
   }
 }
 
@@ -386,13 +386,13 @@ RGWKmipHandles::entry()
     }
     mono_time now = mono_clock::now();
     while (!saved_kmip.empty()) {
-      auto cend = saved_kmip.end();
+      kmip = saved_kmip.front();
       --cend;
       kmip = *cend;
       if (!cleaner_shutdown && now - kmip->lastuse
 	  < std::chrono::seconds(MAXIDLE))
 	break;
-      saved_kmip.erase(cend);
+      saved_kmip.erase(saved_kmip.begin());
       release_kmip_handle_now(kmip);
     }
   }
