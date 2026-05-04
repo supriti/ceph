@@ -1031,9 +1031,33 @@ static int get_sse_s3_bucket_key(req_state *s, optional_yield y,
       break;
     }
 
-    // Conflict: refresh metadata and retry
-    ldpp_dout(s, 5) << "Metadata conflict (ECANCELED), retrying..." << dendl;
+    // Conflict (ECANCELED): someone else may have committed a KEK while we
+    // were trying. Refresh and check.
     s->bucket->try_refresh_info(s, nullptr, y);
+
+    rgw::sal::Attrs refreshed = s->bucket->get_attrs();
+    auto it = refreshed.find(RGW_ATTR_BUCKET_ENCRYPTION_KEY_ID);
+    if (it != refreshed.end() && it->second.length() > 0) {
+      // Someone else committed a KEK. Destroy our orphan, adopt theirs.
+      std::string winner_id = it->second.to_str();
+      if (winner_id != key_id) {
+        ldpp_dout(s, 5) << "Lost KEK race; destroying our orphan KEK "
+                           "(id_len=" << key_id.length()
+                        << ") and adopting winner (id_len="
+                        << winner_id.length() << ")" << dendl;
+        int cleanup_res = remove_sse_s3_bucket_key(s, key_id, y);
+        if (cleanup_res != 0) {
+          ldpp_dout(s, 0) << "WARN: failed to destroy orphan KEK after losing "
+                             "race (id_len=" << key_id.length()
+                          << "); manual cleanup may be required" << dendl;
+        }
+        key_id = winner_id;
+      }
+      return 0;
+    }
+
+    // Bucket attr still empty — retry our commit
+    ldpp_dout(s, 5) << "Metadata conflict (ECANCELED), retrying..." << dendl;
   }
 
   if (res != 0) {
