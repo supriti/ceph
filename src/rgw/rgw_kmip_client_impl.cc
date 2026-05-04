@@ -28,6 +28,7 @@ extern "C" {
 
 #define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_rgw
+#define MAXIDLE 5
 
 static enum kmip_version protocol_version = KMIP_1_4;
 
@@ -310,136 +311,98 @@ Done:
   return r;
 }
 
-struct RGWKmipHandles : public Thread {
+/*
+ * Per-worker persistent KMIP connection.
+ *
+ * Each KMIP worker thread owns one RGWKmipHandles instance. It caches at most
+ * one RGWKmipHandle (TLS connection + libkmip context) so subsequent ops on
+ * the same worker can skip the TLS handshake.
+ *
+ * Since each RGWKmipHandles is only ever accessed by its owning worker
+ * thread, no synchronization is required.
+ *
+ * If the cached connection has been idle longer than MAXIDLE seconds it is
+ * dropped on the next get_kmip_handle() call (lazy eviction).
+ */
+struct RGWKmipHandles {
   CephContext *cct;
-  ceph::mutex cleaner_lock = ceph::make_mutex("RGWKmipHandles::cleaner_lock");
-  std::vector<RGWKmipHandle*> saved_kmip;
-  int cleaner_shutdown;
-  bool cleaner_active = false;
-  ceph::condition_variable cleaner_cond;
-  RGWKmipHandles(CephContext *cct) :
-    cct(cct), cleaner_shutdown{0} {
-  }
+  RGWKmipHandle* cached_kmip = nullptr;
+
+  RGWKmipHandles(CephContext *cct) : cct(cct) {}
+  ~RGWKmipHandles() { flush_kmip_handles(); }
+
   RGWKmipHandle* get_kmip_handle();
   void release_kmip_handle_now(RGWKmipHandle* kmip);
   void release_kmip_handle(RGWKmipHandle* kmip);
   void flush_kmip_handles();
   int do_one_entry(RGWKMIPTransceiver &element);
-  void* entry();
-  void start();
-  void stop();
 };
 
 RGWKmipHandle*
 RGWKmipHandles::get_kmip_handle()
 {
-  RGWKmipHandle* kmip = 0;
+  // Drop the cached connection if it has been idle
+  // longer than MAXIDLE.
+  if (cached_kmip &&
+      mono_clock::now() - cached_kmip->lastuse >= std::chrono::seconds(MAXIDLE)) {
+    kmip_free_handle_stuff(cached_kmip);
+    delete cached_kmip;
+    cached_kmip = nullptr;
+  }
+
+  if (cached_kmip) {
+    RGWKmipHandle* kmip = cached_kmip;
+    cached_kmip = nullptr;
+    return kmip;
+  }
+
   const char *hostaddr = cct->_conf->rgw_crypt_kmip_addr.c_str();
-  {
-    std::lock_guard lock{cleaner_lock};
-    if (!saved_kmip.empty()) {
-      kmip = saved_kmip.back();   // LIFO: reuse most-recently-used connection
-      saved_kmip.pop_back();
-    }
+  if (!hostaddr) {
+    return nullptr;
   }
-  if (!kmip && hostaddr) {
-    char *hosttemp = strdup(hostaddr);
-    char *port = strchr(hosttemp, ':');
-    if (port)
-      *port++ = 0;
-    kmip = RGWKmipHandleBuilder{cct}
-      .set_clientcert(cct->_conf->rgw_crypt_kmip_client_cert)
-      .set_clientkey(cct->_conf->rgw_crypt_kmip_client_key)
-      .set_capath(cct->_conf->rgw_crypt_kmip_ca_path)
-      .set_host(hosttemp)
-      .set_portstring(port ? port : "5696")
-      .set_username(cct->_conf->rgw_crypt_kmip_username)
-      .set_password(cct->_conf->rgw_crypt_kmip_password)
-      .build();
-    free(hosttemp);
-  }
+
+  char *hosttemp = strdup(hostaddr);
+  char *port = strchr(hosttemp, ':');
+  if (port)
+    *port++ = 0;
+  RGWKmipHandle* kmip = RGWKmipHandleBuilder{cct}
+    .set_clientcert(cct->_conf->rgw_crypt_kmip_client_cert)
+    .set_clientkey(cct->_conf->rgw_crypt_kmip_client_key)
+    .set_capath(cct->_conf->rgw_crypt_kmip_ca_path)
+    .set_host(hosttemp)
+    .set_portstring(port ? port : "5696")
+    .set_username(cct->_conf->rgw_crypt_kmip_username)
+    .set_password(cct->_conf->rgw_crypt_kmip_password)
+    .build();
+  free(hosttemp);
   return kmip;
 }
 
 void
 RGWKmipHandles::release_kmip_handle_now(RGWKmipHandle* kmip)
 {
+  if (!kmip) return;
   kmip_free_handle_stuff(kmip);
   delete kmip;
 }
 
-#define MAXIDLE 5
 void
 RGWKmipHandles::release_kmip_handle(RGWKmipHandle* kmip)
 {
-  if (cleaner_shutdown) {
-    release_kmip_handle_now(kmip);
-  } else {
-    std::lock_guard lock{cleaner_lock};
-    kmip->lastuse = mono_clock::now();
-    saved_kmip.push_back(kmip);   // LIFO: get_kmip_handle() pops from back
-  }
-}
+  if (!kmip) return;
 
-void*
-RGWKmipHandles::entry()
-{
-  RGWKmipHandle* kmip;
-  std::unique_lock lock{cleaner_lock};
-
-  for (;;) {
-    if (cleaner_shutdown) {
-      if (saved_kmip.empty())
-	break;
-    } else {
-      cleaner_cond.wait_for(lock, std::chrono::seconds(MAXIDLE));
-    }
-    mono_time now = mono_clock::now();
-    /* Oldest entries are at the front (push_back adds to back, so front is LRU).
-     * Evict from the front until we find a connection used recently enough. */
-    while (!saved_kmip.empty()) {
-      kmip = saved_kmip.front();
-      if (!cleaner_shutdown && now - kmip->lastuse
-	  < std::chrono::seconds(MAXIDLE))
-	break;
-      saved_kmip.erase(saved_kmip.begin());
-      release_kmip_handle_now(kmip);
-    }
-  }
-  return nullptr;
-}
-
-void
-RGWKmipHandles::start()
-{
-  std::lock_guard lock{cleaner_lock};
-  if (!cleaner_active) {
-    cleaner_active = true;
-    this->create("KMIPcleaner");  // len<16!!!
-  }
-}
-
-void
-RGWKmipHandles::stop()
-{
-  std::unique_lock lock{cleaner_lock};
-  cleaner_shutdown = 1;
-  cleaner_cond.notify_all();
-  if (cleaner_active) {
-    lock.unlock();
-    this->join();
-    cleaner_active = false;
-  }
+  kmip->lastuse = mono_clock::now();
+  cached_kmip = kmip;
 }
 
 void
 RGWKmipHandles::flush_kmip_handles()
 {
-  stop();
-  if (!saved_kmip.empty()) {
-    ldout(cct, 0) << "ERROR: " << __func__ << " failed final cleanup" << dendl;
+  if (cached_kmip) {
+    kmip_free_handle_stuff(cached_kmip);
+    delete cached_kmip;
+    cached_kmip = nullptr;
   }
-  saved_kmip.shrink_to_fit();
 }
 
 int
@@ -812,7 +775,6 @@ RGWKmipWorker::entry()
   std::unique_lock entry_lock{m.lock};
   ldout(m.cct, 10) << __func__ << " start" << dendl;
   RGWKmipHandles handles{m.cct};
-  handles.start();
   while (!m.going_down) {
     if (m.requests.empty()) {
       m.cond.wait_for(entry_lock, std::chrono::seconds(MAXIDLE));
@@ -840,7 +802,7 @@ RGWKmipWorker::entry()
     node->details.cond.notify_all();
     delete node;
   }
-  handles.stop();
+  // ~RGWKmipHandles cleans up the cached connection when handles goes out of scope
   ldout(m.cct, 10) << __func__ << " finish" << dendl;
   return nullptr;
 }
