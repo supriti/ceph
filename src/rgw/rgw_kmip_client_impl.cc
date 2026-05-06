@@ -73,7 +73,9 @@ struct RGWKmipHandle {
 
 struct RGWKmipWorker: public Thread {
   RGWKMIPManagerImpl &m;
-  RGWKmipWorker(RGWKMIPManagerImpl& m) : m(m) {}
+  const int worker_id;
+  RGWKmipWorker(RGWKMIPManagerImpl& m, int wid)
+    : m(m), worker_id(wid) {}
   void *entry() override;
 };
 
@@ -254,7 +256,7 @@ RGWKmipHandleBuilder::build() const
 
   {
     int64_t sec = cct->_conf->rgw_crypt_kmip_socket_io_timeout_sec;
-    if (sec < 0) {
+    if (sec <= 0) {
       sec = 0;
     } else if (sec > 300) {
       sec = 300;
@@ -420,7 +422,7 @@ RGWKMIPManagerImpl::start()
   for (int64_t i = 0; i < n; ++i) {
     char name[16];
     snprintf(name, sizeof(name), "rgwkmip%" PRId64, i);
-    auto w = std::make_unique<RGWKmipWorker>(*this);
+    auto w = std::make_unique<RGWKmipWorker>(*this, (int)i);
     w->create(name);
     workers.push_back(std::move(w));
   }
@@ -770,7 +772,7 @@ void *
 RGWKmipWorker::entry()
 {
   std::unique_lock entry_lock{m.lock};
-  ldout(m.cct, 10) << __func__ << " start" << dendl;
+  ldout(m.cct, 10) << "kmip_worker[" << worker_id << "] start" << dendl;
   RGWKmipHandles handles{m.cct};
   while (!m.going_down) {
     if (m.requests.empty()) {
@@ -780,7 +782,7 @@ RGWKmipWorker::entry()
     auto iter = m.requests.begin();
     RGWKMIPManagerImpl::Request *node = &*iter;
     m.requests.erase(iter);
-    ldout(m.cct, 10) << "KMIP WORKER: remaining queue depth "
+    ldout(m.cct, 10) << "kmip_worker[" << worker_id << "] remaining queue depth "
                     << m.requests.size() << dendl;
     entry_lock.unlock();
     (void) handles.do_one_entry(node->details);
@@ -791,7 +793,7 @@ RGWKmipWorker::entry()
     if (m.requests.empty()) break;
     auto iter = m.requests.begin();
     RGWKMIPManagerImpl::Request *node = &*iter;
-    ldout(m.cct, 10) << "KMIP WORKER: Dispatching op="
+    ldout(m.cct, 10) << "kmip_worker[" << worker_id << "] dispatching op="
                     << (int)node->details.operation << dendl;
     m.requests.erase(iter);
     node->details.ret = -ECANCELED;
@@ -799,6 +801,6 @@ RGWKmipWorker::entry()
     node->details.cond.notify_all();
     delete node;
   }
-  ldout(m.cct, 10) << __func__ << " finish" << dendl;
+  ldout(m.cct, 10) << "kmip_worker[" << worker_id << "] finish" << dendl;
   return nullptr;
 }
