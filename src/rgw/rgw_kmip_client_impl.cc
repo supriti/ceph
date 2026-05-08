@@ -335,23 +335,34 @@ struct RGWKmipHandles {
   void release_kmip_handle_now(RGWKmipHandle* kmip);
   void release_kmip_handle(RGWKmipHandle* kmip);
   void flush_kmip_handles();
+  /* Drop the cached connection if it's been idle ≥ MAXIDLE seconds.
+   * Called proactively from the worker's idle loop so the server doesn't
+   * see a half-dead long-lived connection. Lazy-equivalent of the same
+   * check at the top of get_kmip_handle(). */
+  void evict_if_stale();
   int do_one_entry(RGWKMIPTransceiver &element);
 };
 
-RGWKmipHandle*
-RGWKmipHandles::get_kmip_handle()
+void
+RGWKmipHandles::evict_if_stale()
 {
-  // Drop the cached connection if it has been idle
-  // longer than MAXIDLE.
   if (cached_kmip &&
       mono_clock::now() - cached_kmip->lastuse >= std::chrono::seconds(MAXIDLE)) {
     kmip_free_handle_stuff(cached_kmip);
     delete cached_kmip;
     cached_kmip = nullptr;
   }
+}
+
+RGWKmipHandle*
+RGWKmipHandles::get_kmip_handle()
+{
+  RGWKmipHandle* kmip = nullptr;
+
+  evict_if_stale();
 
   if (cached_kmip) {
-    RGWKmipHandle* kmip = cached_kmip;
+    kmip = cached_kmip;
     cached_kmip = nullptr;
     return kmip;
   }
@@ -365,7 +376,7 @@ RGWKmipHandles::get_kmip_handle()
   char *port = strchr(hosttemp, ':');
   if (port)
     *port++ = 0;
-  RGWKmipHandle* kmip = RGWKmipHandleBuilder{cct}
+  kmip = RGWKmipHandleBuilder{cct}
     .set_clientcert(cct->_conf->rgw_crypt_kmip_client_cert)
     .set_clientkey(cct->_conf->rgw_crypt_kmip_client_key)
     .set_capath(cct->_conf->rgw_crypt_kmip_ca_path)
@@ -778,6 +789,13 @@ RGWKmipWorker::entry()
   while (!m.going_down) {
     if (m.requests.empty()) {
       m.cond.wait_for(entry_lock, std::chrono::seconds(MAXIDLE));
+      /* If we woke from the timeout (still no work), proactively drop a
+       * cached TLS connection that's been idle past MAXIDLE.  Lazy eviction
+       * in get_kmip_handle() alone wouldn't fire until a fresh request shows
+       * up, so possibly never, on idle workers. */
+      if (m.requests.empty()) {
+        handles.evict_if_stale();
+      }
       continue;
     }
     auto iter = m.requests.begin();
