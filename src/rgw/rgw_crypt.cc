@@ -12,6 +12,7 @@
 #include <auth/Crypto.h>
 #include <rgw/rgw_b64.h>
 #include <rgw/rgw_rest_s3.h>
+#include "common/errno.h"
 #include "include/ceph_assert.h"
 #include "include/function2.hpp"
 #include "crypto/crypto_accel.h"
@@ -1033,7 +1034,17 @@ static int get_sse_s3_bucket_key(req_state *s, optional_yield y,
 
     // Conflict (ECANCELED): someone else may have committed a KEK while we
     // were trying. Refresh and check.
-    s->bucket->try_refresh_info(s, nullptr, y);
+    int r = s->bucket->try_refresh_info(s, nullptr, y);
+    if (r < 0) {
+      ldpp_dout(s, 0) << "ERROR: try_refresh_info() failed: " << dendl;
+      //One quick try before giving up, blips mon/rados blips are usually momentary.
+      r = s->bucket->try_refresh_info(s, nullptr, y);
+    }
+    if (r < 0) {
+      ldpp_dout(s, 0) << "ERROR: try_refresh_info() failed: "
+                    << cpp_strerror(r) << dendl;
+      return r;
+    }
 
     rgw::sal::Attrs refreshed = s->bucket->get_attrs();
     auto it = refreshed.find(RGW_ATTR_BUCKET_ENCRYPTION_KEY_ID);
