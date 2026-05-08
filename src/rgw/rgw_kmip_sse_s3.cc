@@ -57,27 +57,28 @@ RGWKmipSSES3::RGWKmipSSES3(CephContext* cct)
 }
 
 int RGWKmipSSES3::initialize() {
+  const DoutPrefix dp(cct, dout_subsys, "KMIP SSE-S3: ");
   if (rgw_kmip_manager) {
-    ldout(cct, 10) << "KMIP SSE-S3 reusing global KMIP manager" << dendl;
+    ldpp_dout(&dp, 10) << "reusing global KMIP manager" << dendl;
     return 0;
   }
 
   rgw_kmip_manager = new (std::nothrow) RGWKMIPManagerImpl(cct);
   if (!rgw_kmip_manager) {
-    ldout(cct, 0) << "ERROR: Failed to create KMIP manager (alloc)" << dendl;
+    ldpp_dout(&dp, 0) << "ERROR: failed to create KMIP manager (alloc)" << dendl;
     return -ENOMEM;
   }
 
   int ret = rgw_kmip_manager->start();
   if (ret < 0) {
-    ldout(cct, 0) << "ERROR: Failed to start KMIP manager: "
-                  << cpp_strerror(ret) << dendl;
+    ldpp_dout(&dp, 0) << "ERROR: failed to start KMIP manager: "
+                      << cpp_strerror(ret) << dendl;
     delete rgw_kmip_manager;
     rgw_kmip_manager = nullptr;
     return ret;
   }
 
-  ldout(cct, 10) << "KMIP SSE-S3 backend initialized standalone KMIP manager" << dendl;
+  ldpp_dout(&dp, 10) << "backend initialized standalone KMIP manager" << dendl;
   return 0;
 }
 
@@ -85,8 +86,9 @@ int RGWKmipSSES3::create_bucket_key(const DoutPrefixProvider* dpp,
                                      const std::string& bucket_id,
                                      std::string& kek_id_out,
                                      optional_yield y) {
+  const DoutPrefix dp(dpp->get_cct(), dout_subsys, "KMIP SSE-S3: ");
   if (!rgw_kmip_manager) {
-    ldpp_dout(dpp, 0) << "ERROR: KMIP manager not available" << dendl;
+    ldpp_dout(&dp, 0) << "ERROR: KMIP manager not available" << dendl;
     return -EINVAL;
   }
 
@@ -157,17 +159,17 @@ int RGWKmipSSES3::create_bucket_key(const DoutPrefixProvider* dpp,
     }
 
     if (r != KMIP_OK || !key_id) {
-      ldpp_dout(dpp, 5) << "KMIP create failed: " << r << dendl;
+      ldpp_dout(&dp, 5) << "create failed: " << r << dendl;
       ERR_clear_error();
       return -EIO;
     }
 
     kek_id_out = std::string(key_id, key_id_size);
-    ldpp_dout(dpp, 10) << "KMIP created key id_len=" << kek_id_out.length() << dendl;
+    ldpp_dout(&dp, 10) << "created key id_len=" << kek_id_out.length() << dendl;
 
     r = kmip_bio_activate_with_context(ctx, bio, key_id);
     if (r != KMIP_OK) {
-      ldpp_dout(dpp, 0) << "KMIP activate failed id_len=" << kek_id_out.length()
+      ldpp_dout(&dp, 0) << "activate failed id_len=" << kek_id_out.length()
                         << ", destroying orphaned key" << dendl;
       kmip_bio_destroy_symmetric_key_with_context(ctx, bio,
         const_cast<char*>(kek_id_out.c_str()), kek_id_out.length());
@@ -181,11 +183,11 @@ int RGWKmipSSES3::create_bucket_key(const DoutPrefixProvider* dpp,
   });
 
   if (ret < 0) {
-    ldpp_dout(dpp, 0) << "Create KEK failed" << dendl;
+    ldpp_dout(&dp, 0) << "ERROR: create KEK failed" << dendl;
     return ret;
   }
 
-  ldpp_dout(dpp, 10) << "KMIP created and activated KEK id_len=" << kek_id_out.length()
+  ldpp_dout(&dp, 10) << "created and activated KEK id_len=" << kek_id_out.length()
                      << dendl;
   return 0;
 }
@@ -194,8 +196,9 @@ int RGWKmipSSES3::create_bucket_key(const DoutPrefixProvider* dpp,
 int RGWKmipSSES3::destroy_bucket_key(const DoutPrefixProvider* dpp,
                                       const std::string& kek_id,
                                       optional_yield y) {
+  const DoutPrefix dp(dpp->get_cct(), dout_subsys, "KMIP SSE-S3: ");
   if (!rgw_kmip_manager) {
-    ldpp_dout(dpp, 0) << "ERROR: KMIP manager not available for destroy" << dendl;
+    ldpp_dout(&dp, 0) << "ERROR: KMIP manager not available for destroy" << dendl;
     return -EINVAL;
   }
 
@@ -210,14 +213,14 @@ int RGWKmipSSES3::destroy_bucket_key(const DoutPrefixProvider* dpp,
     int revoke_res = kmip_bio_revoke_with_context(
         ctx, bio, id_ptr, id_len, KMIP_REVOCATION_CESSATION_OF_OPERATION);
     if (revoke_res != 0) {
-      ldpp_dout(dpp, 0) << "KMIP revoke KEK id_len=" << kek_id.length()
+      ldpp_dout(&dp, 0) << "revoke KEK id_len=" << kek_id.length()
                         << " returned " << revoke_res
                         << " (proceeding to destroy)" << dendl;
       ERR_clear_error();
     }
     int destroy_res = kmip_bio_destroy_symmetric_key_with_context(ctx, bio, id_ptr, id_len);
     if (destroy_res != 0) {
-      ldpp_dout(dpp, 0) << "KMIP destroy failed: " << destroy_res << dendl;
+      ldpp_dout(&dp, 0) << "ERROR: destroy failed: " << destroy_res << dendl;
       ERR_clear_error();
       return -EIO;
     }
@@ -225,9 +228,9 @@ int RGWKmipSSES3::destroy_bucket_key(const DoutPrefixProvider* dpp,
   });
 
   if (ret < 0) {
-    ldpp_dout(dpp, 0) << "Destroy KEK failed: " << cpp_strerror(ret) << dendl;
+    ldpp_dout(&dp, 0) << "ERROR: destroy KEK failed: " << cpp_strerror(ret) << dendl;
   } else {
-    ldpp_dout(dpp, 10) << "Successfully destroyed KEK id_len=" << kek_id.length()
+    ldpp_dout(&dp, 10) << "successfully destroyed KEK id_len=" << kek_id.length()
                        << dendl;
   }
   return ret;
@@ -240,15 +243,16 @@ int RGWKmipSSES3::generate_and_wrap_dek(const DoutPrefixProvider* dpp,
                                          bufferlist& plaintext_dek_out,
                                          bufferlist& wrapped_dek_out,
                                          optional_yield y) {
+  const DoutPrefix dp(dpp->get_cct(), dout_subsys, "KMIP SSE-S3: ");
   if (!rgw_kmip_manager) {
-    ldpp_dout(dpp, 0) << "ERROR: KMIP manager not available for wrap" << dendl;
+    ldpp_dout(&dp, 0) << "ERROR: KMIP manager not available for wrap" << dendl;
     return -EINVAL;
   }
 
   // Generate random DEK
   unsigned char dek[KMIP_DEK_SIZE];
   if (RAND_bytes(dek, KMIP_DEK_SIZE) != 1) {
-    ldpp_dout(dpp, 0) << "Failed to generate DEK" << dendl;
+    ldpp_dout(&dp, 0) << "ERROR: failed to generate DEK" << dendl;
     return -EIO;
   }
 
@@ -305,7 +309,7 @@ int RGWKmipSSES3::generate_and_wrap_dek(const DoutPrefixProvider* dpp,
     );
 
     if (r != KMIP_OK) {
-      ldpp_dout(dpp, 0) << "KMIP encrypt failed: " << r << dendl;
+      ldpp_dout(&dp, 0) << "ERROR: encrypt failed: " << r << dendl;
       kmip_zeroize_free(ciphertext, ciphertext_size);
       kmip_zeroize_free(iv, iv_size);
       kmip_zeroize_free(tag, tag_size);
@@ -323,21 +327,21 @@ int RGWKmipSSES3::generate_and_wrap_dek(const DoutPrefixProvider* dpp,
     kmip_zeroize_free(iv, iv_size);
     kmip_zeroize_free(tag, tag_size);
 
-    ldpp_dout(dpp, 10) << "KMIP encrypt succeeded, wrapped_dek="
+    ldpp_dout(&dp, 10) << "encrypt succeeded, wrapped_dek="
                        << wrapped_dek_out.length() << " bytes" << dendl;
     return 0;
   });
 
   if (ret < 0) {
     explicit_bzero(dek, KMIP_DEK_SIZE);
-    ldpp_dout(dpp, 0) << "KMIP wrap DEK failed" << dendl;
+    ldpp_dout(&dp, 0) << "ERROR: wrap DEK failed" << dendl;
     return ret;
   }
 
   plaintext_dek_out.append((char*)dek, KMIP_DEK_SIZE);
   explicit_bzero(dek, KMIP_DEK_SIZE);
 
-  ldpp_dout(dpp, 10) << "KMIP wrapped DEK, size=" << wrapped_dek_out.length() << dendl;
+  ldpp_dout(&dp, 10) << "wrapped DEK, size=" << wrapped_dek_out.length() << dendl;
   return 0;
 }
 
@@ -347,8 +351,9 @@ int RGWKmipSSES3::unwrap_dek(const DoutPrefixProvider* dpp,
                               const std::string& encryption_context,
                               bufferlist& plaintext_dek_out,
                               optional_yield y) {
+  const DoutPrefix dp(dpp->get_cct(), dout_subsys, "KMIP SSE-S3: ");
   if (!rgw_kmip_manager) {
-    ldpp_dout(dpp, 0) << "ERROR: KMIP manager not available for unwrap" << dendl;
+    ldpp_dout(&dp, 0) << "ERROR: KMIP manager not available for unwrap" << dendl;
     return -EINVAL;
   }
 
@@ -358,13 +363,13 @@ int RGWKmipSSES3::unwrap_dek(const DoutPrefixProvider* dpp,
     auto p = wrapped_dek.cbegin();
     decode(wd, p);
   } catch (const ceph::buffer::error& e) {
-    ldpp_dout(dpp, 0) << "KMIP ERROR: failed to decode wrapped DEK: "
+    ldpp_dout(&dp, 0) << "ERROR: failed to decode wrapped DEK: "
                       << e.what() << dendl;
     return -EINVAL;
   }
   if (wd.tag.length() != 16 || wd.iv.length() == 0 ||
       wd.ciphertext.length() == 0) {
-    ldpp_dout(dpp, 0) << "KMIP ERROR: invalid wrapped DEK layout"
+    ldpp_dout(&dp, 0) << "ERROR: invalid wrapped DEK layout"
                       << " iv=" << wd.iv.length()
                       << " tag=" << wd.tag.length()
                       << " ct=" << wd.ciphertext.length() << dendl;
@@ -409,7 +414,7 @@ int RGWKmipSSES3::unwrap_dek(const DoutPrefixProvider* dpp,
     );
 
     if (r != KMIP_OK || plaintext_size != KMIP_DEK_SIZE) {
-      ldpp_dout(dpp, 0) << "KMIP decrypt failed: ret=" << r
+      ldpp_dout(&dp, 0) << "ERROR: decrypt failed: ret=" << r
                         << " plaintext_size=" << plaintext_size << dendl;
       if (plaintext) {
         ::ceph::crypto::zeroize_for_security(plaintext, plaintext_size);
@@ -425,27 +430,28 @@ int RGWKmipSSES3::unwrap_dek(const DoutPrefixProvider* dpp,
   });
 
   if (ret < 0) {
-    ldpp_dout(dpp, 0) << "Unwrap DEK failed: " << cpp_strerror(ret) << dendl;
+    ldpp_dout(&dp, 0) << "ERROR: unwrap DEK failed: " << cpp_strerror(ret) << dendl;
     return ret;
   }
 
-  ldpp_dout(dpp, 10) << "Successfully unwrapped DEK ("
+  ldpp_dout(&dp, 10) << "successfully unwrapped DEK ("
                       << plaintext_dek_out.length() << " bytes)" << dendl;
   return 0;
 }
 
 RGWKmipSseS3Backend* get_kmip_sse_s3_backend(CephContext* cct) {
+  const DoutPrefix dp(cct, dout_subsys, "KMIP SSE-S3: ");
   std::unique_lock l{g_kmip_sse_s3_lock};
 
   if (!g_kmip_sse_s3_backend) {
     g_kmip_sse_s3_backend = new (std::nothrow) RGWKmipSSES3(cct);
     if (!g_kmip_sse_s3_backend) {
-      ldout(cct, 0) << "Failed to allocate KMIP SSE-S3 backend" << dendl;
+      ldpp_dout(&dp, 0) << "ERROR: failed to allocate backend" << dendl;
       return nullptr;
     }
     int ret = g_kmip_sse_s3_backend->initialize();
     if (ret < 0) {
-      ldout(cct, 0) << "Failed to initialize KMIP SSE-S3 backend" << dendl;
+      ldpp_dout(&dp, 0) << "ERROR: failed to initialize backend" << dendl;
       delete g_kmip_sse_s3_backend;
       g_kmip_sse_s3_backend = nullptr;
     }
