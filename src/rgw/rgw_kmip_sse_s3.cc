@@ -16,6 +16,7 @@ extern "C" {
 }
 
 #include "include/buffer.h"
+#include "include/encoding.h"
 
 #define dout_subsys ceph_subsys_rgw
 
@@ -25,56 +26,30 @@ static RGWKmipSSES3* g_kmip_sse_s3_backend = nullptr;
 static ceph::mutex g_kmip_sse_s3_lock = ceph::make_mutex("kmip_sse_s3");
 
 namespace {
+struct wrapped_dek {
+  ceph::buffer::list iv;
+  ceph::buffer::list tag;
+  ceph::buffer::list ciphertext;
 
-/*
- * Parsed layout of RGW-produced KMIP AES-GCM wrapped DEK blobs:
- *   u32 iv_len_be, u32 tag_len_be, iv[], tag[], ciphertext[]
- */
-struct wrapped_dek_layout {
-  uint32_t iv_size = 0;
-  uint32_t tag_size = 0;
-  uint32_t ciphertext_size = 0;
-  const char *iv_ptr = nullptr;
-  const char *tag_ptr = nullptr;
-  const char *ciphertext_ptr = nullptr;
+  void encode(ceph::buffer::list& bl) const {
+    ENCODE_START(1, 1, bl);
+    using ceph::encode;
+    encode(iv, bl);
+    encode(tag, bl);
+    encode(ciphertext, bl);
+    ENCODE_FINISH(bl);
+  }
+
+  void decode(ceph::buffer::list::const_iterator& p) {
+    DECODE_START(1, p);
+    using ceph::decode;
+    decode(iv, p);
+    decode(tag, p);
+    decode(ciphertext, p);
+    DECODE_FINISH(p);
+  }
 };
-
-/*
- * Validate wrapped DEK header and sizes; does not decrypt.
- * Returns 0 on success, -EINVAL if malformed.
- */
-static int parse_wrapped_dek(const char *raw, size_t len,
-                             wrapped_dek_layout *out)
-{
-  if (!out || !raw) {
-    return -EINVAL;
-  }
-  *out = wrapped_dek_layout{};
-  if (len < 52) {
-    return -EINVAL;
-  }
-  uint32_t iv_size_net, tag_size_net;
-  memcpy(&iv_size_net, raw, 4);
-  memcpy(&tag_size_net, raw + 4, 4);
-  const uint32_t iv_size = ntohl(iv_size_net);
-  const uint32_t tag_size = ntohl(tag_size_net);
-  const size_t need = size_t(8) + iv_size + tag_size;
-  if (need > len || tag_size != 16) {
-    return -EINVAL;
-  }
-  const size_t ct_size = len - 8 - iv_size - tag_size;
-  if (ct_size == 0 || ct_size > UINT32_MAX) {
-    return -EINVAL;
-  }
-  out->iv_size = iv_size;
-  out->tag_size = tag_size;
-  out->ciphertext_size = static_cast<uint32_t>(ct_size);
-  out->iv_ptr = raw + 8;
-  out->tag_ptr = out->iv_ptr + iv_size;
-  out->ciphertext_ptr = out->tag_ptr + tag_size;
-  return 0;
-}
-
+WRITE_CLASS_ENCODER(wrapped_dek)
 } // namespace
 
 RGWKmipSSES3::RGWKmipSSES3(CephContext* cct)
@@ -342,14 +317,12 @@ int RGWKmipSSES3::generate_and_wrap_dek(const DoutPrefixProvider* dpp,
       return -EIO;
     }
 
-    uint32_t iv_sz_n = htonl(iv_size);
-    uint32_t tag_sz_n = htonl(tag_size);
-
-    wrapped_dek_out.append((char*)&iv_sz_n, 4);
-    wrapped_dek_out.append((char*)&tag_sz_n, 4);
-    wrapped_dek_out.append((char*)iv, iv_size);
-    wrapped_dek_out.append((char*)tag, tag_size);
-    wrapped_dek_out.append((char*)ciphertext, ciphertext_size);
+    wrapped_dek wd;
+    wd.iv.append((char*)iv, iv_size);
+    wd.tag.append((char*)tag, tag_size);
+    wd.ciphertext.append((char*)ciphertext, ciphertext_size);
+    using ceph::encode;
+    encode(wd, wrapped_dek_out);
 
     kmip_zeroize_free(ciphertext, ciphertext_size);
     kmip_zeroize_free(iv, iv_size);
@@ -387,28 +360,27 @@ int RGWKmipSSES3::unwrap_dek(const DoutPrefixProvider* dpp,
     return -EINVAL;
   }
 
-  if (wrapped_dek.length() < 8) {
-    ldpp_dout(&dp, 0) << "ERROR: metadata size mismatch" << dendl;
+  struct wrapped_dek wd;
+  try {
+    using ceph::decode;
+    auto p = wrapped_dek.cbegin();
+    decode(wd, p);
+  } catch (const ceph::buffer::error& e) {
+    ldpp_dout(&dp, 0) << "ERROR: failed to decode wrapped DEK: " << e.what()
+                      << dendl;
     return -EINVAL;
+  }
+  if (wd.tag.length() != 16 || wd.iv.length() == 0 ||
+      wd.ciphertext.length() == 0) {
+    ldpp_dout(&dp, 0) << "ERROR: invalid wrapped DEK layout"
+                      << " iv=" << wd.iv.length()
+                      << " tag=" << wd.tag.length()
+                      << " ct=" << wd.ciphertext.length() << dendl;
+     return -EINVAL;
   }
 
   auto unwrap_dek_op = [&](KMIP* ctx, BIO* bio) -> int {
-    /* kmip_bio_decrypt_with_context resets ctx at entry */
     plaintext_dek_out.clear();
-
-    std::vector<char> buffer(wrapped_dek.length());
-    wrapped_dek.begin().copy(wrapped_dek.length(), buffer.data());
-    wrapped_dek_layout layout{};
-    if (parse_wrapped_dek(buffer.data(), buffer.size(), &layout) != 0) {
-      ldpp_dout(&dp, 0) << "ERROR: invalid wrapped DEK layout len="
-                        << buffer.size() << dendl;
-      return -EINVAL;
-    }
-
-    const uint8_t* iv_ptr = reinterpret_cast<const uint8_t*>(layout.iv_ptr);
-    const uint8_t* tag_ptr = reinterpret_cast<const uint8_t*>(layout.tag_ptr);
-    const uint8_t* ct_ptr = reinterpret_cast<const uint8_t*>(layout.ciphertext_ptr);
-    const int ct_size = static_cast<int>(layout.ciphertext_size);
 
     CryptographicParameters params;
     memset(&params, 0, sizeof(params));
@@ -423,8 +395,6 @@ int RGWKmipSSES3::unwrap_dek(const DoutPrefixProvider* dpp,
     if (!aad.empty() && aad.back() == '\0') {
       aad.pop_back();
     }
-    const uint8_t* aad_ptr = reinterpret_cast<const uint8_t*>(aad.c_str());
-    int aad_len = static_cast<int>(aad.length());
 
     uint8_t* plaintext = nullptr;
     int32_t plaintext_size = 0;
@@ -432,10 +402,14 @@ int RGWKmipSSES3::unwrap_dek(const DoutPrefixProvider* dpp,
     int r = kmip_bio_decrypt_with_context(
       ctx, bio,
       const_cast<char*>(kek_id.c_str()), (int)kek_id.length(),
-      const_cast<uint8_t*>(ct_ptr), ct_size,
-      const_cast<uint8_t*>(aad_ptr), aad_len,
-      const_cast<uint8_t*>(iv_ptr), static_cast<int>(layout.iv_size),
-      const_cast<uint8_t*>(tag_ptr), static_cast<int>(layout.tag_size),
+      reinterpret_cast<uint8_t*>(wd.ciphertext.c_str()),
+      static_cast<int>(wd.ciphertext.length()),
+      reinterpret_cast<uint8_t*>(aad.data()),
+      static_cast<int>(aad.length()),
+      reinterpret_cast<uint8_t*>(wd.iv.c_str()),
+      static_cast<int>(wd.iv.length()),
+      reinterpret_cast<uint8_t*>(wd.tag.c_str()),
+      static_cast<int>(wd.tag.length()),
       &params,
       &plaintext, &plaintext_size
     );
