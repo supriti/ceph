@@ -81,7 +81,8 @@ RGWKMIPTransceiver::~RGWKMIPTransceiver()
 int
 RGWKMIPManager::execute_fn(const DoutPrefixProvider* dpp,
                             optional_yield y,
-                            std::function<int(KMIP*, BIO*)> fn)
+                            std::function<int(KMIP*, BIO*)> fn,
+                            int* worker_id_out)
 {
   /* Thin wrapper that adapts a std::function to the RGWKMIPTransceiver
    * virtual-dispatch interface.  execute() returns non-zero so do_one_entry
@@ -101,7 +102,9 @@ RGWKMIPManager::execute_fn(const DoutPrefixProvider* dpp,
   FnOp op(cct, std::move(fn));
   int r = add_request(&op);
   if (r < 0) return r;
-  return op.wait(dpp, y);
+  int rc = op.wait(dpp, y);
+  if (worker_id_out) *worker_id_out = op.worker_id;
+  return rc;
 }
 
 void

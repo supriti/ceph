@@ -195,7 +195,8 @@ int RGWKmipSSES3::create_bucket_key(const DoutPrefixProvider* dpp,
 
 int RGWKmipSSES3::destroy_bucket_key(const DoutPrefixProvider* dpp,
                                       const std::string& kek_id,
-                                      optional_yield y) {
+                                      optional_yield y,
+                                      int* worker_id_out) {
   const DoutPrefix dp(dpp->get_cct(), dout_subsys, "KMIP SSE-S3: ");
   if (!rgw_kmip_manager) {
     ldpp_dout(&dp, 0) << "ERROR: KMIP manager not available for destroy" << dendl;
@@ -225,7 +226,7 @@ int RGWKmipSSES3::destroy_bucket_key(const DoutPrefixProvider* dpp,
       return -EIO;
     }
     return 0;
-  });
+  }, worker_id_out);
 
   if (ret < 0) {
     ldpp_dout(&dp, 0) << "ERROR: destroy KEK failed: " << cpp_strerror(ret) << dendl;
