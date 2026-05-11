@@ -69,7 +69,6 @@
 #include "rgw_bucket_sync.h"
 #include "rgw_bucket_logging.h"
 #include "rgw_restore.h"
-#include "rgw_kmip_sse_s3.h"
 
 #include "services/svc_zone.h"
 #include "services/svc_quota.h"

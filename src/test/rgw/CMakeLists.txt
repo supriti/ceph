@@ -305,7 +305,6 @@ target_include_directories(unittest_rgw_kms
   SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/src/rgw")
 target_link_libraries(unittest_rgw_kms ${rgw_libs})
 
-
 # unittest_rgw_url
 add_executable(unittest_rgw_url test_rgw_url.cc)
 add_ceph_unittest(unittest_rgw_url)
