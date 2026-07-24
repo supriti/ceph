@@ -94,6 +94,20 @@ Note the following:
   To keep a user read-only, assign it *only* the reader role. Roles that are
   in no accepted list at all are ignored and do not affect the cap.
 
+Authenticated-only roles
+------------------------
+
+``rgw keystone accepted authenticated only roles`` designates Keystone roles
+that authenticate a user without granting any implicit permissions.
+Access must be granted explicitly through a bucket
+policy or IAM policy (for example with a ``keystone:userid`` or
+``keystone:role`` condition), and an explicit ``Allow`` then applies only to
+the buckets and objects the policy names. 
+The role must also be listed in ``rgw keystone accepted roles``, an explicit
+policy ``Deny`` always wins, and any role granting more (``admin``, a project
+reader role, or another accepted role such as ``member``) takes precedence over
+the authenticated-only cap.
+
 Ocata (and Later)
 -----------------
 

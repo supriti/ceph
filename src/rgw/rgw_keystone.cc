@@ -292,7 +292,8 @@ int TokenEnvelope::parse(const DoutPrefixProvider *dpp,
 void TokenEnvelope::update_roles(const std::vector<std::string> & plain,
                                  const std::vector<std::string> & admin,
                                  const std::vector<std::string> & system_reader,
-                                 const std::vector<std::string> & project_reader)
+                                 const std::vector<std::string> & project_reader,
+                                 const std::vector<std::string> & authenticated_only)
 {
   for (auto& iter: roles) {
     for (const auto& r : plain) {
@@ -319,24 +320,51 @@ void TokenEnvelope::update_roles(const std::vector<std::string> & plain,
         break;
       }
     }
+    for (const auto& r : authenticated_only) {
+      if (fnmatch(r.c_str(), iter.name.c_str(), 0) == 0) {
+        iter.is_authenticated_only = true;
+        break;
+      }
+    }
   }
 }
 
-bool TokenEnvelope::is_project_reader_only() const
+/* Derive the ACL permission mask for the token from its role flags.
+ * Admin and plain accepted roles (e.g. member) grant full control; a
+ * project_reader role caps the mask to read-only; an authenticated_only
+ * role grants no implicit permissions at all (mask 0), leaving any
+ * access to explicit bucket or IAM policy grants. Across roles the most
+ * permissive outcome wins. A capped role must also be in the accepted
+ * list; roles in no accepted list grant nothing and are ignored. */
+uint32_t TokenEnvelope::effective_perm_mask() const
 {
   bool any_reader = false;
+  bool any_authenticated_only = false;
   for (const auto& r : roles) {
     if (r.is_admin) {
-      return false;
+      return RGW_PERM_FULL_CONTROL;
     }
-    if (r.is_accepted && !r.is_project_reader) {
-      return false;
-    } else if (r.is_accepted && r.is_project_reader) {
-      // project_reader must also be in accepted roles.
+    if (!r.is_accepted) {
+      continue;
+    }
+    if (r.is_project_reader) {
       any_reader = true;
+    } else if (r.is_authenticated_only) {
+      any_authenticated_only = true;
+    } else {
+      // a plain accepted role grants full control
+      return RGW_PERM_FULL_CONTROL;
     }
   }
-  return any_reader;
+  if (any_reader) {
+    return RGW_PERM_READ;
+  }
+  if (any_authenticated_only) {
+    return 0;
+  }
+  /* No accepted role on the token: unreachable behind the engines'
+   * accepted-role check; keep the historical full-control default. */
+  return RGW_PERM_FULL_CONTROL;
 }
 
 bool TokenCache::find(const std::string& token_id,

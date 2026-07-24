@@ -151,13 +151,15 @@ public:
 
   class Role {
   public:
-    Role() : is_admin(false), is_system_reader(false), is_project_reader(false), is_accepted(false) { }
+    Role() : is_admin(false), is_system_reader(false), is_project_reader(false),
+             is_authenticated_only(false), is_accepted(false) { }
     Role(const Role &r) {
       id = r.id;
       name = r.name;
       is_admin = r.is_admin;
       is_system_reader = r.is_system_reader;
       is_project_reader = r.is_project_reader;
+      is_authenticated_only = r.is_authenticated_only;
       is_accepted = r.is_accepted;
     }
     std::string id;
@@ -165,6 +167,7 @@ public:
     bool is_admin;
     bool is_system_reader;
     bool is_project_reader;
+    bool is_authenticated_only;
     bool is_accepted;
     void decode_json(JSONObj *obj);
   };
@@ -207,7 +210,7 @@ public:
   const std::string& get_user_id() const {return user.id;};
   const std::string& get_user_name() const {return user.name;};
   bool has_role(const std::string& r) const;
-  bool is_project_reader_only() const;
+  uint32_t effective_perm_mask() const;
   bool expired() const {
     const uint64_t now = ceph_clock_now().sec();
     return std::cmp_greater_equal(now, get_expires());
@@ -218,7 +221,8 @@ public:
   void update_roles(const std::vector<std::string> & plain,
                     const std::vector<std::string> & admin,
                     const std::vector<std::string> & system_reader,
-                    const std::vector<std::string> & project_reader);
+                    const std::vector<std::string> & project_reader,
+                    const std::vector<std::string> & authenticated_only);
 };
 
 

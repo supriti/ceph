@@ -30,6 +30,9 @@
   ``project_reader_roles`` behavior of Swift's keystoneauth middleware. A bucket
   policy naming the user can still grant additional access. The reader role must
   also be listed in ``rgw_keystone_accepted_roles``.
+* RGW: New config option ``rgw_keystone_accepted_authenticated_only_roles``.
+  A Keystone user who is only authenticated by gets no explicit permissions.
+  (implicit deny). Access must be granted explicitly through a bucket policy or IAM policy, and applies only to the buckets and objects the policy names. The role must also be listed in ``rgw_keystone_accepted_roles``.
 * ceph-volume: Raw BlueStore OSD preparation now pre-formats NVMe devices and
   skips the slower BlueStore discard phase,reducing mkfs time on
   very large namespaces.

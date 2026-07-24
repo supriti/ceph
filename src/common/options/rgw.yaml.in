@@ -1004,6 +1004,22 @@ options:
   services:
   - rgw
   with_legacy: true
+- name: rgw_keystone_accepted_authenticated_only_roles
+  type: str
+  level: advanced
+  desc: Keystone roles granting authentication with no implicit permissions.
+  long_desc: >-
+    Keystone roles that only authenticate a user without granting any
+    implicit permissions. Every request is denied unless a bucket policy
+    or IAM policy explicitly allows it, and such a grant applies only to
+    the resources the policy names. The user cannot list the project's
+    buckets, create buckets, or write Swift account metadata. Any role
+    granting more (admin, project reader, or another accepted role)
+    takes precedence. The role must also be listed in
+    rgw_keystone_accepted_roles.
+  services:
+  - rgw
+  with_legacy: true
 - name: rgw_keystone_token_cache_size
   type: int
   level: advanced
