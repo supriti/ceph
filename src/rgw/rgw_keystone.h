@@ -12,6 +12,7 @@
 
 #include "rgw_common.h"
 #include "rgw_http_client.h"
+#include "common/async/call_once.h"
 #include "common/ceph_mutex.h"
 #include "common/Clock.h" // for ceph_clock_now()
 #include "global/global_init.h"
@@ -221,6 +222,13 @@ class TokenCache {
     std::list<std::string>::iterator lru_iter;
   };
 
+public:
+  /* The outcome of an admin token request: the error to return, and the token
+   * id when there is none. Shared by every request that waited for it. */
+  using admin_token_result = std::pair<int, std::string>;
+  using admin_token_once = ceph::async::once_result<admin_token_result>;
+
+private:
   std::atomic<bool> down_flag = { false };
   const boost::intrusive_ptr<CephContext> cct;
 
@@ -230,6 +238,10 @@ class TokenCache {
   std::map<std::string, token_entry> service_tokens;
   std::list<std::string> tokens_lru;
   std::list<std::string> service_tokens_lru;
+
+  /* The admin token request currently in flight, if any. There is only ever
+   * one admin token, so one holder is enough -- no key needed. */
+  std::shared_ptr<admin_token_once> admin_once;
 
   ceph::mutex lock = ceph::make_mutex("rgw::keystone::TokenCache");
 
@@ -283,6 +295,14 @@ public:
   void invalidate(const DoutPrefixProvider *dpp, const std::string& token_id);
   void invalidate_admin(const DoutPrefixProvider *dpp);
   bool going_down() const;
+
+  /* Return the admin token request to join, creating one if none is in flight.
+   * Which caller ends up issuing it is decided by call_once(), not here. */
+  std::shared_ptr<admin_token_once> get_admin_once();
+  /* Retire an admin token request once it has completed, so that the next miss
+   * -- from expiry or from invalidate_admin() -- issues a new one rather than
+   * replaying a stale result. Ignored if a newer request took its place. */
+  void reset_admin_once(const std::shared_ptr<admin_token_once>& expected);
 private:
   void add_locked(const std::string& token_id, const TokenEnvelope& token,
                   std::map<std::string, token_entry>& tokens, std::list<std::string>& tokens_lru);

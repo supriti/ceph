@@ -125,11 +125,37 @@ int Service::get_admin_token(const DoutPrefixProvider *dpp,
     return 0;
   }
 
-  /* Call Keystone now. */
-  const auto ret = issue_admin_token_request(dpp, config, y, t);
+  /* Every uncached authentication needs an admin token, so a burst of cache
+   * misses would otherwise produce a burst of v3/auth/tokens requests. Share
+   * one request between all of them. Which caller issues it is decided by
+   * call_once(), not by who created the entry. */
+  auto once = token_cache.get_admin_once();
+
+  TokenCache::admin_token_result result{-EINVAL, std::string{}};
+  try {
+    result = call_once(*once, y, [&] () -> TokenCache::admin_token_result {
+        TokenEnvelope fresh;
+        const int r = issue_admin_token_request(dpp, config, y, fresh);
+        if (r < 0) {
+          return {r, std::string{}};
+        }
+        /* Publish before the waiters wake, so a request arriving just after
+         * this one completes finds a cache hit rather than starting again. */
+        token_cache.add_admin(fresh);
+        return {0, fresh.token.id};
+      });
+  } catch (...) {
+    token_cache.reset_admin_once(once);
+    throw;
+  }
+
+  /* Retire the request now that it has completed, so the next miss issues a
+   * new one instead of replaying this result. */
+  token_cache.reset_admin_once(once);
+
+  const auto [ret, token_id] = result;
   if (! ret) {
-    token_cache.add_admin(t);
-    token = t.token.id;
+    token = token_id;
   }
 
   return ret;
@@ -434,6 +460,26 @@ void TokenCache::invalidate(const DoutPrefixProvider *dpp, const std::string& to
 void TokenCache::invalidate_admin(const DoutPrefixProvider *dpp)
 {
   invalidate(dpp, admin_token_id);
+}
+
+std::shared_ptr<TokenCache::admin_token_once> TokenCache::get_admin_once()
+{
+  std::lock_guard l{lock};
+  if (! admin_once) {
+    admin_once = std::make_shared<admin_token_once>();
+  }
+  return admin_once;
+}
+
+void TokenCache::reset_admin_once(
+    const std::shared_ptr<admin_token_once>& expected)
+{
+  std::lock_guard l{lock};
+  /* Only if it is still the request we were given: a newer one may already
+   * have taken its place, and dropping that would orphan its waiters. */
+  if (admin_once == expected) {
+    admin_once.reset();
+  }
 }
 
 bool TokenCache::going_down() const
