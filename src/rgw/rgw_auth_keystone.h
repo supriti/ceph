@@ -7,10 +7,13 @@
 #include <utility>
 #include <boost/optional.hpp>
 
+#include "include/expected.hpp"
+
 #include "rgw_auth.h"
 #include "rgw_rest_s3.h"
 #include "rgw_common.h"
 #include "rgw_keystone.h"
+#include "rgw_single_flight.h"
 
 namespace rgw {
 namespace auth {
@@ -28,6 +31,20 @@ class TokenEngine : public rgw::auth::Engine {
   using result_t = rgw::auth::Engine::result_t;
   using token_envelope_t = rgw::keystone::TokenEnvelope;
 
+  /* A validated token, or the error to fail the request with. Errors travel as
+   * values rather than exceptions because SingleFlight hands the same Result to
+   * every waiter, and no waiter should have an exception thrown at it on
+   * another request's behalf. */
+  using fetch_result = tl::expected<token_envelope_t, int>;
+
+  /* Deduplicates concurrent validations of the same token. Shared by all engine
+   * instances, because two requests carrying the same token may land on
+   * different TokenEngine objects and still need to find each other. */
+  static rgw::SingleFlight<fetch_result>& get_flight() {
+    static rgw::SingleFlight<fetch_result> flight;
+    return flight;
+  }
+
   const rgw::auth::TokenExtractor* const auth_token_extractor;
   const rgw::auth::TokenExtractor* const service_token_extractor;
   const rgw::auth::RemoteApplier::Factory* const apl_factory;
@@ -42,6 +59,20 @@ class TokenEngine : public rgw::auth::Engine {
                     const std::string& token,
                     bool allow_expired,
                     optional_yield y) const;
+
+  /* Wrapper to handle errors from get_from_keystone()
+   *
+   * get_from_keystone() fails in two different ways: it returns an empty
+   * boost::optional, or it throws an int. This returns a fetch_result either
+   * way, so a caller has one thing to check instead of two.
+   *
+   * This is the work that SingleFlight shares between concurrent requests,
+   * which is why the errors have to be values: the same result is handed to
+   * every waiter, and an exception cannot travel that way. */
+  fetch_result fetch_token(const DoutPrefixProvider* dpp,
+                           const std::string& token,
+                           bool allow_expired,
+                           optional_yield y) const;
 
   acl_strategy_t get_acl_strategy(const token_envelope_t& token) const;
   auth_info_t get_creds_info(const token_envelope_t& token) const noexcept;

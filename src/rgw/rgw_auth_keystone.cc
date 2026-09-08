@@ -18,6 +18,7 @@
 #include "rgw_keystone.h"
 #include "rgw_keystone_scope.h"
 #include "rgw_auth_keystone.h"
+#include "rgw_perf_counters.h"
 #include "rgw_rest_s3.h"
 #include "rgw_auth_s3.h"
 
@@ -234,6 +235,27 @@ TokenEngine::get_acl_strategy(const TokenEngine::token_envelope_t& token) const
   };
 }
 
+TokenEngine::fetch_result
+TokenEngine::fetch_token(const DoutPrefixProvider* dpp,
+                         const std::string& token,
+                         bool allow_expired,
+                         optional_yield y) const
+{
+  try {
+    auto env = get_from_keystone(dpp, token, allow_expired, y);
+    if (! env) {
+      return tl::unexpected(-EACCES);
+    }
+    return *env;
+  } catch (const int err) {
+    /* get_from_keystone() reports transport and configuration errors by
+     * throwing an int. Return it as a value: an int thrown from here would
+     * escape call_once(), which catches only std::exception, leaving every
+     * waiter queued behind this fetch parked forever. */
+    return tl::unexpected(err);
+  }
+}
+
 TokenEngine::result_t
 TokenEngine::authenticate(const DoutPrefixProvider* dpp,
                           const std::string& token,
@@ -355,11 +377,32 @@ TokenEngine::authenticate(const DoutPrefixProvider* dpp,
 
   /* Token not in cache. Go to the Keystone for validation. This happens even
    * for the legacy PKI/PKIz token types. That's it, after the PKI/PKIz
-   * RadosGW-side validation has been removed, we always ask Keystone. */
-  t = get_from_keystone(dpp, token, allow_expired, y);
-  if (! t) {
-    return result_t::deny(-EACCES);
+   * RadosGW-side validation has been removed, we always ask Keystone.
+   *
+   * Concurrent requests carrying the same token share a single validation.
+   * allow_expired is part of the key because it changes the request we send:
+   * it decides whether we carry the admin token and ?allow_expired=1 or the
+   * client's own token. Within one key every request sends the same thing, so
+   * the result -- a failure included -- applies to all of them. The entry is
+   * dropped once the request completes, so a failure is never remembered. */
+  const std::string flight_key = allow_expired ? token_id + ":allow_expired"
+                                               : token_id;
+  auto [result, fetched] = get_flight().get(flight_key, y,
+      [&] { return fetch_token(dpp, token, allow_expired, y); });
+  if (! result) {
+    return result_t::deny(result.error());
   }
+  if (! fetched) {
+    ldpp_dout(dpp, 20) << "shared keystone validation of token_id=" << token_id
+                       << dendl;
+    if (perfcounter) {
+      perfcounter->inc(l_rgw_keystone_token_cache_coalesced);
+    }
+  }
+  t = std::move(result.value());
+
+  /* What keystone said is shared; what we conclude from it is not. update_roles
+   * and the checks below stay per request. */
   t->update_roles(roles.admin, roles.reader);
 
   /* Verify expiration. */
