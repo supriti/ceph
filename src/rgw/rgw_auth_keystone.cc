@@ -338,11 +338,18 @@ TokenEngine::authenticate(const DoutPrefixProvider* dpp,
       /* Service token was not found in cache. Go to Keystone for validating
        * the token. The allow_expired here must always be false. */
       ceph_assert(allow_expired == false);
-      st = get_from_keystone(dpp, service_token, allow_expired, y);
 
-      if (! st) {
-        return result_t::deny(-EACCES);
+      /* Concurrent requests carrying the same service token share one
+       * validation, exactly as the main token does below. */
+      auto [st_result, st_fetched] = get_flight().get(service_token_id, y,
+          [&] { return fetch_token(dpp, service_token, allow_expired, y); });
+      if (! st_result) {
+        return result_t::deny(st_result.error());
       }
+      if (! st_fetched && perfcounter) {
+        perfcounter->inc(l_rgw_keystone_token_cache_coalesced);
+      }
+      st = std::move(st_result.value());
 
       /* Verify expiration of service token. */
       if (st->expired()) {
