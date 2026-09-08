@@ -184,6 +184,33 @@ class EC2Engine : public rgw::auth::s3::AWSEngine {
                     const std::string_view& signature,
                     optional_yield y) const;
 
+  /* The credentials of an access key as resolved from Keystone. */
+  struct creds {
+    token_envelope_t token;
+    std::string secret;
+  };
+  /* Resolved credentials, or the error to fail the request with. */
+  using creds_result = tl::expected<creds, int>;
+
+  /* Deduplicates concurrent lookups of the same access key. Shared by all
+   * engine instances, like the SecretCache it fronts. */
+  static rgw::SingleFlight<creds_result>& get_creds_flight() {
+    static rgw::SingleFlight<creds_result> flight;
+    return flight;
+  }
+
+  /* Asks Keystone to validate our credentials and then looks up their secret,
+   * and stores the pair in the SecretCache. This is the work that
+   * SingleFlight shares between concurrent requests for one access key.
+   *
+   * Every failure comes back as a creds_result holding the error, including
+   * the ints that get_from_keystone() throws. */
+  creds_result fetch_creds(const DoutPrefixProvider* dpp,
+                           const std::string_view& access_key_id,
+                           const std::string& string_to_sign,
+                           const std::string_view& signature,
+                           optional_yield y) const;
+
   struct access_token_result {
     boost::optional<token_envelope_t> token;
     boost::optional<std::string> secret_key;
