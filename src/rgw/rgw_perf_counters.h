@@ -25,6 +25,7 @@ enum {
 
   l_rgw_keystone_token_cache_hit,
   l_rgw_keystone_token_cache_miss,
+  l_rgw_keystone_token_cache_coalesced,
 
   l_rgw_gc_retire,
 
