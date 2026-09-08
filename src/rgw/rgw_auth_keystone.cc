@@ -646,9 +646,6 @@ auto EC2Engine::get_access_token(const DoutPrefixProvider* dpp,
     -> access_token_result
 {
   using server_signature_t = VersionAbstractor::server_signature_t;
-  boost::optional<rgw::keystone::TokenEnvelope> token;
-  boost::optional<std::string> secret;
-  int failure_reason;
 
   /* Get a token from the cache if one has already been stored */
   boost::optional<boost::tuple<rgw::keystone::TokenEnvelope, std::string>>
@@ -674,22 +671,97 @@ auto EC2Engine::get_access_token(const DoutPrefixProvider* dpp,
     ldpp_dout(dpp, 0) << "No stored secret string, cache miss" << dendl;
   }
 
-  /* No cached token, token expired, or secret invalid: fall back to keystone */
-  std::tie(token, failure_reason) =
-      get_from_keystone(dpp, access_key_id, string_to_sign, signature, y);
+  /* No cached token, token expired, or secret invalid: fall back to keystone.
+   *
+   * Concurrent requests for one access key share a single lookup. Unlike the
+   * token path, the verdict here is not fully transferable: the v3/s3tokens
+   * call validates the signature of whichever request issued it. Success is
+   * shareable, because the token and secret belong to the access key -- which
+   * is what the cache already assumed. A failure is not: a request that
+   * adopted a rejection it did not cause must ask for itself, or one bad
+   * signature would reject legitimate requests racing with it.
+   *
+   * Bounded, so that a stream of bad signatures cannot make us loop. */
+  constexpr int max_attempts = 3;
+  for (int attempt = 0; attempt < max_attempts; attempt++) {
+    auto [result, fetched] = get_creds_flight().get(std::string(access_key_id), y,
+        [&] { return fetch_creds(dpp, access_key_id, string_to_sign,
+                                 signature, y); });
 
-  if (token) {
-    /* Fetch secret from keystone for the access_key_id */
-    std::tie(secret, failure_reason) =
-        get_secret_from_keystone(dpp, token->get_user_id(), access_key_id, y);
-
-    if (secret) {
-      /* Add token, secret pair to cache, and set timeout */
-      secret_cache.add(std::string(access_key_id), *token, *secret);
+    if (! fetched && perfcounter) {
+      perfcounter->inc(l_rgw_keystone_token_cache_coalesced);
     }
+
+    if (! result) {
+      if (! fetched) {
+        /* Somebody else's rejection. Ask keystone about our own credentials. */
+        ldpp_dout(dpp, 20) << "keystone lookup we did not make failed with "
+                           << result.error() << ", retrying with our own request"
+                           << dendl;
+        continue;
+      }
+      return {boost::none, boost::none, result.error()};
+    }
+
+    if (ignore_signature) {
+      return {result->token, result->secret, 0};
+    }
+
+    std::string sig(signature);
+    server_signature_t server_signature =
+        signature_factory(cct, result->secret, string_to_sign);
+    if (sig.compare(server_signature) == 0) {
+      return {result->token, result->secret, 0};
+    }
+
+    if (fetched) {
+      /* Keystone accepted our signature but the secret it gave us does not
+       * reproduce it. Nothing left to try. */
+      ldpp_dout(dpp, 0) << "Fetched secret string does not correctly sign payload"
+                        << dendl;
+      break;
+    }
+
+    /* An adopted secret that does not sign this request: it may have been
+     * rotated in Keystone. Drop it and ask for ourselves. */
+    ldpp_dout(dpp, 0) << "Shared secret string does not correctly sign payload, "
+                      << "retrying with our own request" << dendl;
   }
 
-  return {token, secret, failure_reason};
+  return {boost::none, boost::none, -ERR_SIGNATURE_NO_MATCH};
+}
+
+EC2Engine::creds_result
+EC2Engine::fetch_creds(const DoutPrefixProvider* dpp,
+                       const std::string_view& access_key_id,
+                       const std::string& string_to_sign,
+                       const std::string_view& signature,
+                       optional_yield y) const
+{
+  try {
+    auto [token, failure_reason] =
+        get_from_keystone(dpp, access_key_id, string_to_sign, signature, y);
+    if (! token) {
+      return tl::unexpected(failure_reason);
+    }
+
+    boost::optional<std::string> secret;
+    std::tie(secret, failure_reason) =
+        get_secret_from_keystone(dpp, token->get_user_id(), access_key_id, y);
+    if (! secret) {
+      return tl::unexpected(failure_reason);
+    }
+
+    /* Publish before the waiters wake, so a request arriving just after this
+     * one completes finds a cache hit rather than starting a new lookup. */
+    secret_cache.add(std::string(access_key_id), *token, *secret);
+    return creds{std::move(*token), std::move(*secret)};
+  } catch (const int err) {
+    /* get_from_keystone() reports transport and configuration errors by
+     * throwing an int. Return it as a value so that no waiter has an exception
+     * thrown at it on another request's behalf. */
+    return tl::unexpected(err);
+  }
 }
 
 EC2Engine::acl_strategy_t
