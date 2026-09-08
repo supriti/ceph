@@ -369,6 +369,13 @@ target_include_directories(unittest_rgw_kms_cache
   SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/src/rgw")
 target_link_libraries(unittest_rgw_kms_cache ${rgw_libs})
 
+# unittest_rgw_single_flight
+add_executable(unittest_rgw_single_flight test_rgw_single_flight.cc)
+add_ceph_unittest(unittest_rgw_single_flight)
+target_include_directories(unittest_rgw_single_flight
+  SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/src/rgw")
+target_link_libraries(unittest_rgw_single_flight ${rgw_libs})
+
 # unittest_rgw_url
 add_executable(unittest_rgw_url test_rgw_url.cc)
 add_ceph_unittest(unittest_rgw_url)
