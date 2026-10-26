@@ -116,8 +116,8 @@ zone: zone name
 zone_id: zone name
 
 (evaluated when syncing)
-bucket: bucket name
-owner: bucket owner
+bucket: bucket name, qualified as "<tenant>/<bucket>" for a tenanted bucket
+owner: bucket owner, qualified as "<tenant>-<owner>" for a tenanted bucket
 
 */
 
@@ -612,38 +612,75 @@ struct AWSSyncConfig {
     }
   }
 
-  string get_path(std::shared_ptr<AWSSyncConfig_Profile>& profile,
-                  const RGWBucketInfo& bucket_info,
-                  const rgw_obj_key& obj) {
-    string bucket_str;
-    string owner;
-    if (!bucket_info.bucket.tenant.empty()) {
-      bucket_str = owner = bucket_info.bucket.tenant + "-";
-      owner += to_string(bucket_info.owner);
-    }
-    bucket_str += bucket_info.bucket.name;
-
-    const string& path = profile->target_path;
-
-    string new_path;
-    apply_meta_param(path, "bucket", bucket_str, &new_path);
-    apply_meta_param(new_path, "owner", owner, &new_path);
-
-    new_path += string("/") + get_key_oid(obj);
-
-    return new_path;
+  /*
+   * True if ${bucket} expands into the destination *bucket name* rather than
+   * into the object key, i.e. nothing in the template puts a '/' ahead of it.
+   * A tenanted bucket expands to "<tenant>/<bucket>", and '/' is not legal in
+   * a bucket name, so such a target cannot represent a tenanted source bucket.
+   *
+   * npos compares greater than any real position, so this is also false when
+   * the template has no ${bucket} at all.
+   */
+  static bool bucket_expands_to_dest_bucket_name(const string& target_path) {
+    return target_path.find("${bucket}") < target_path.find('/');
   }
 
-  void get_target(std::shared_ptr<AWSSyncConfig_Profile>& profile,
-                  const RGWBucketInfo& bucket_info,
-                  const rgw_obj_key& obj,
-                  string *bucket_name,
-                  string *obj_name) {
-    string path = get_path(profile, bucket_info, obj);
+  /*
+   * ${bucket} expands to the bucket's namespaced name, so a tenanted bucket is
+   * qualified with '/' rather than '-'. Bucket names may contain '-' but never
+   * '/', so "<tenant>/<bucket>" cannot be confused with an untenanted bucket
+   * named "<tenant>-<bucket>" - which previously aliased onto the same
+   * destination path and silently overwrote it. rgw_make_bucket_entry_name()
+   * chose '/' for the same reason.
+   */
+  int get_path(const DoutPrefixProvider *dpp,
+               std::shared_ptr<AWSSyncConfig_Profile>& profile,
+               const RGWBucketInfo& bucket_info,
+               const rgw_obj_key& obj,
+               string *result) {
+    string owner;
+    if (!bucket_info.bucket.tenant.empty()) {
+      if (bucket_expands_to_dest_bucket_name(profile->target_path)) {
+        ldpp_dout(dpp, 0) << "ERROR: cannot sync tenanted bucket "
+            << bucket_info.bucket << ": target_path \"" << profile->target_path
+            << "\" expands ${bucket} into the destination bucket name, which "
+            << "cannot hold the '/' tenant qualifier. Prefix the target with a "
+            << "destination bucket, e.g. \"<dest-bucket>/${bucket}\"." << dendl;
+        return -EINVAL;
+      }
+      /* ${owner} keeps its historical "<tenant>-<owner>" form. It cannot
+       * collide the way ${bucket} did: tenant names exclude '-'
+       * (rgw_validate_tenant_name()), and an untenanted bucket leaves ${owner}
+       * empty, so no untenanted bucket produces a "<tenant>-<owner>" string. */
+      owner = bucket_info.bucket.tenant + "-" + to_string(bucket_info.owner);
+    }
+
+    apply_meta_param(profile->target_path, "bucket",
+                     bucket_info.bucket.get_namespaced_name(), result);
+    apply_meta_param(*result, "owner", owner, result);
+
+    *result += '/';
+    *result += get_key_oid(obj);
+
+    return 0;
+  }
+
+  int get_target(const DoutPrefixProvider *dpp,
+                 std::shared_ptr<AWSSyncConfig_Profile>& profile,
+                 const RGWBucketInfo& bucket_info,
+                 const rgw_obj_key& obj,
+                 string *bucket_name,
+                 string *obj_name) {
+    string path;
+    int r = get_path(dpp, profile, bucket_info, obj, &path);
+    if (r < 0) {
+      return r;
+    }
     size_t pos = path.find('/');
 
     *bucket_name = path.substr(0, pos);
     *obj_name = path.substr(pos + 1);
+    return 0;
   }
 
   void init_conns(RGWDataSyncCtx *sc, const string& id) {
@@ -1634,7 +1671,12 @@ public:
       }
 
       instance.get_profile(sync_pipe.info.source_bs.bucket, &target);
-      instance.conf.get_target(target, sync_pipe.dest_bucket_info, key, &dest_obj.bucket.name, &dest_obj.key.name);
+      /* r is scoped to the if: a declaration at coroutine-body scope would be
+       * jumped over by reenter's switch on resume. */
+      if (int r = instance.conf.get_target(dpp, target, sync_pipe.dest_bucket_info, key,
+                                           &dest_obj.bucket.name, &dest_obj.key.name); r < 0) {
+        return set_cr_error(r);
+      }
 
       if (bucket_created.find(dest_obj.bucket.name) == bucket_created.end()){
         yield {
@@ -1751,7 +1793,12 @@ public:
                               << " b=" <<sync_pipe.info.source_bs.bucket << " k=" << key << " mtime=" << mtime << dendl;
       yield {
         instance.get_profile(sync_pipe.info.source_bs.bucket, &target);
-        string path =  instance.conf.get_path(target, sync_pipe.dest_bucket_info, key);
+        string path;
+        int r = instance.conf.get_path(dpp, target, sync_pipe.dest_bucket_info,
+                                       key, &path);
+        if (r < 0) {
+          return set_cr_error(r);
+        }
         ldpp_dout(dpp, 0) << "AWS: removing aws object at" << path << dendl;
 
         call(new RGWDeleteRESTResourceCR(sc->cct, target->conn.get(),

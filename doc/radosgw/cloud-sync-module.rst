@@ -144,8 +144,15 @@ Non Trivial Configuration
   * ``zonegroup_id``: the zonegroup ID
   * ``zone``: the zone name
   * ``zone_id``: the zone id
-  * ``bucket``: source bucket name
-  * ``owner``: source bucket owner ID
+  * ``bucket``: source bucket name. A bucket owned by a user in a tenant
+    expands to ``<tenant>/<bucket>``, for example ``proj1/data``. Because a
+    bucket name cannot contain ``/``, a ``target_path`` that puts ``${bucket}``
+    first -- where it becomes the destination bucket name rather than part of
+    the object key -- cannot be used with tenanted buckets, and syncing one is
+    refused. Put a destination bucket in front, as in
+    ``<dest-bucket>/${bucket}``, so the expansion lands in the object key
+  * ``owner``: source bucket owner ID, expanded as ``<tenant>-<owner>`` for a
+    bucket belonging to a tenant
 
   For example: ``target_path = rgwx-${zone}-${sid}/${owner}/${bucket}``
 
